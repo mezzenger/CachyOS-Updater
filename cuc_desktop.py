@@ -411,7 +411,7 @@ class SettingsWindow(Adw.PreferencesWindow):
 class UpdateWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="Cachy Update Center")
-        self.set_default_size(960, 680)
+        self.set_default_size(960, 780)
         self.set_size_request(460, 480)
         self.config_warning: str | None = None
         self.config = self.load_config()
