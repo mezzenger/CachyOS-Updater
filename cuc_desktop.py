@@ -54,19 +54,19 @@ class SourceCard(Gtk.Box):
     """One compact update-source summary card."""
 
     def __init__(self, source: str, on_install) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.source = source
         self.on_install = on_install
         self.add_css_class("source-card")
         self.set_hexpand(True)
         self.set_vexpand(False)
         self.set_size_request(280, -1)
-        self.set_margin_top(6)
-        self.set_margin_bottom(6)
-        self.set_margin_start(6)
-        self.set_margin_end(6)
+        self.set_margin_top(3)
+        self.set_margin_bottom(3)
+        self.set_margin_start(3)
+        self.set_margin_end(3)
 
-        top = Gtk.Box(spacing=12)
+        top = Gtk.Box(spacing=10)
         icon_well = Gtk.Box()
         icon_well.add_css_class("source-icon-well")
         icon = Gtk.Image.new_from_icon_name(SOURCE_ICONS[source])
@@ -114,14 +114,14 @@ class SourceCard(Gtk.Box):
         self.more_packages.connect("activate-link", self.show_all_packages)
         self.append(self.more_packages)
 
-        footer = Gtk.Box()
-        footer.set_halign(Gtk.Align.END)
+        self.footer = Gtk.Box()
+        self.footer.set_halign(Gtk.Align.END)
         self.install_button = Gtk.Button(label="Install updates")
         self.install_button.set_icon_name("system-software-install-symbolic")
         self.install_button.add_css_class("primary-action")
         self.install_button.connect("clicked", lambda *_: self.on_install(self.source))
-        footer.append(self.install_button)
-        self.append(footer)
+        self.footer.append(self.install_button)
+        self.append(self.footer)
 
         self.show_checking()
 
@@ -134,9 +134,11 @@ class SourceCard(Gtk.Box):
         self.count.set_text("—")
         self.detail.set_text("Contacting this update source.")
         self.items.set_text("")
+        self.items.set_visible(False)
         self.all_packages = []
         self.has_updates = False
         self.more_packages.set_visible(False)
+        self.footer.set_visible(False)
         self.install_button.set_label("Review updates")
         self.install_button.set_sensitive(False)
 
@@ -146,9 +148,11 @@ class SourceCard(Gtk.Box):
         self.status.remove_css_class("status-warn")
         self.status.remove_css_class("status-error")
         self.items.set_text("")
+        self.items.set_visible(False)
         self.all_packages = []
         self.has_updates = False
         self.more_packages.set_visible(False)
+        self.footer.set_visible(False)
 
         if not result.available_on_system:
             self.status.set_text("Not installed")
@@ -188,6 +192,8 @@ class SourceCard(Gtk.Box):
                 self.more_packages.set_label(f"Show {remaining} more")
                 self.more_packages.set_visible(True)
             self.items.set_text("\n".join(preview))
+            self.items.set_visible(True)
+            self.footer.set_visible(True)
             self.install_button.set_label("Review safety" if not result.install_allowed else "Review updates")
             self.install_button.set_sensitive(True)
             return
@@ -405,8 +411,8 @@ class SettingsWindow(Adw.PreferencesWindow):
 class UpdateWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="Cachy Update Center")
-        self.set_default_size(1040, 760)
-        self.set_size_request(480, 540)
+        self.set_default_size(960, 680)
+        self.set_size_request(460, 480)
         self.config_warning: str | None = None
         self.config = self.load_config()
         self.state: cuc.AppState | None = None
@@ -437,22 +443,22 @@ class UpdateWindow(Adw.ApplicationWindow):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         toolbar_view.set_content(scroll)
-        clamp = Adw.Clamp(maximum_size=1160, tightening_threshold=880)
+        clamp = Adw.Clamp(maximum_size=1040, tightening_threshold=820)
         scroll.set_child(clamp)
 
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
-        page.set_margin_top(28)
-        page.set_margin_bottom(32)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        page.set_margin_top(20)
+        page.set_margin_bottom(24)
+        page.set_margin_start(20)
+        page.set_margin_end(20)
         clamp.set_child(page)
 
-        hero = Gtk.Box(spacing=18)
+        hero = Gtk.Box(spacing=14)
         hero.add_css_class("overview-panel")
         hero_icon_well = Gtk.Box()
         hero_icon_well.add_css_class("overview-icon-well")
         hero_icon = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
-        hero_icon.set_pixel_size(40)
+        hero_icon.set_pixel_size(32)
         hero_icon.add_css_class("overview-icon")
         hero_icon_well.append(hero_icon)
         hero.append(hero_icon_well)
@@ -483,6 +489,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.install_all_button.add_css_class("primary-action")
         self.install_all_button.set_valign(Gtk.Align.CENTER)
         self.install_all_button.set_sensitive(False)
+        self.install_all_button.set_visible(False)
         self.install_all_button.connect("clicked", lambda *_: self.confirm_install(None))
         actions.append(self.install_all_button)
         hero.append(actions)
@@ -529,8 +536,8 @@ class UpdateWindow(Adw.ApplicationWindow):
         grid.set_selection_mode(Gtk.SelectionMode.NONE)
         grid.set_min_children_per_line(1)
         grid.set_max_children_per_line(2)
-        grid.set_column_spacing(12)
-        grid.set_row_spacing(12)
+        grid.set_column_spacing(8)
+        grid.set_row_spacing(8)
         grid.set_homogeneous(True)
         grid.set_valign(Gtk.Align.START)
         for source in SOURCE_ORDER:
@@ -564,8 +571,8 @@ class UpdateWindow(Adw.ApplicationWindow):
     def install_css(self) -> None:
         css = b"""
         .overview-panel {
-          padding: 24px;
-          border-radius: 18px;
+          padding: 18px;
+          border-radius: 16px;
           background: @card_bg_color;
           border: 1px solid alpha(@window_fg_color, 0.14);
           box-shadow: 0 2px 8px alpha(#000000, 0.08);
@@ -576,8 +583,8 @@ class UpdateWindow(Adw.ApplicationWindow):
           color: @window_fg_color;
         }
         .overview-icon-well {
-          min-width: 72px;
-          min-height: 72px;
+          min-width: 56px;
+          min-height: 56px;
         }
         .source-icon-well {
           min-width: 44px;
@@ -597,8 +604,8 @@ class UpdateWindow(Adw.ApplicationWindow):
         .overview-current { color: @success_color; }
         .overview-error { color: @error_color; }
         .source-card {
-          padding: 20px;
-          border-radius: 20px;
+          padding: 14px;
+          border-radius: 16px;
           background: @card_bg_color;
           border: 1px solid alpha(@borders, 0.72);
           box-shadow: 0 1px 3px alpha(#000000, 0.07);
@@ -635,7 +642,6 @@ class UpdateWindow(Adw.ApplicationWindow):
         .package-list {
           font-family: monospace;
           font-size: 0.9em;
-          min-height: 3.2em;
         }
         .package-preview {
           padding: 10px 12px;
@@ -690,6 +696,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.state = None
         self.refresh_button.set_sensitive(False)
         self.install_all_button.set_sensitive(False)
+        self.install_all_button.set_visible(False)
         self.install_all_button.set_label("Review updates")
         self.notice.set_visible(False)
         self.security_notice.set_visible(False)
@@ -731,6 +738,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         unavailable = state.unavailable_results()
         targets = [source for source, result in state.results.items() if result.available]
         self.install_all_button.set_sensitive(bool(targets))
+        self.install_all_button.set_visible(bool(targets))
         if total:
             self.install_all_button.set_label(f"Review {total} update{'s' if total != 1 else ''}")
         self.last_checked.set_text(f"Last checked {datetime.now().strftime('%H:%M')}")
@@ -920,7 +928,9 @@ class UpdateWindow(Adw.ApplicationWindow):
             for source, result in self.state.results.items():
                 if source in self.cards:
                     self.cards[source].update(result)
-            self.install_all_button.set_sensitive(any(result.available for result in self.state.results.values()))
+            has_updates = any(result.available for result in self.state.results.values())
+            self.install_all_button.set_sensitive(has_updates)
+            self.install_all_button.set_visible(has_updates)
 
     def abort_update(self, message: str) -> bool:
         self.session.fail(message)
