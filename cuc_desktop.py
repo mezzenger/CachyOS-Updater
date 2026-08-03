@@ -411,7 +411,7 @@ class SettingsWindow(Adw.PreferencesWindow):
 class UpdateWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="Cachy Update Center")
-        self.set_default_size(960, 780)
+        self.set_default_size(960, 640)
         self.set_size_request(460, 480)
         self.config_warning: str | None = None
         self.config = self.load_config()
@@ -556,7 +556,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         open_terminal.set_hexpand(True)
         open_terminal.connect("clicked", lambda *_: self.open_terminal())
         footer.append(open_terminal)
-        page.append(footer)
+        toolbar_view.add_bottom_bar(footer)
 
         self.install_css()
         self.refresh()
@@ -666,8 +666,9 @@ class UpdateWindow(Adw.ApplicationWindow):
         }
         .section-header { padding: 6px 4px 0; }
         .footer {
-          padding: 16px 4px 0;
-          border-top: 1px solid @borders;
+          padding: 10px 20px;
+          background: @headerbar_bg_color;
+          border-top: 1px solid alpha(@borders, 0.80);
         }
         """
         provider = Gtk.CssProvider()
