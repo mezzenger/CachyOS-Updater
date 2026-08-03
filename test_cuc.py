@@ -12,6 +12,9 @@ FIXTURE_DIR = Path(__file__).parent / "tests" / "fixtures"
 
 
 class ConfigTests(unittest.TestCase):
+    def test_application_version_uses_semantic_versioning(self) -> None:
+        self.assertRegex(cuc.__version__, r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+
     def test_missing_config_uses_defaults_without_creating_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

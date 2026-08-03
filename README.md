@@ -53,6 +53,12 @@ Print machine-readable JSON:
 ./cuc.py --json
 ```
 
+Show the installed version:
+
+```sh
+./cuc.py --version
+```
+
 ## Documentation
 
 - [INSTALL.md](INSTALL.md): dependencies, desktop launcher setup, and install notes.

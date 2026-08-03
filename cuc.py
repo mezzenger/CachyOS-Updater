@@ -50,6 +50,7 @@ except ImportError:
     sys.exit(1)
 
 APP_NAME = "cachyos-update-center"
+__version__ = "0.2.0"
 DEFAULT_PIPER_MODEL = "/usr/share/piper-voices/en/en_GB/alba/medium/en_GB-alba-medium.onnx"
 DEFAULT_PREVIEW_DIR = Path.home() / ".cache" / "update-check-preview"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / APP_NAME / "config.json"
@@ -600,7 +601,7 @@ def fetch_aur_metadata(package_names: list[str], *, timeout: int) -> dict[str, d
         query = urllib.parse.urlencode([("arg[]", name) for name in batch])
         request = urllib.request.Request(
             f"{AUR_RPC_URL}?{query}",
-            headers={"User-Agent": f"{APP_NAME}/1"},
+            headers={"User-Agent": f"{APP_NAME}/{__version__}"},
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
@@ -1061,6 +1062,7 @@ def parse_install_targets(raw: str) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CachyOS multi-source update checker and installer")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to JSON config file")
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument("--refresh-only", action="store_true", help="Check updates once and exit")
