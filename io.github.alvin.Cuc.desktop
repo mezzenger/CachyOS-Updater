@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Cachy Update Center
+Comment=Check and install system updates from a native GNOME dashboard
+Exec=cuc-desktop
+TryExec=cuc-desktop
+Icon=software-update-available
+Terminal=false
+Type=Application
+Categories=System;
+Keywords=update;upgrade;pacman;aur;flatpak;snap;cachyos;
+StartupNotify=true
+StartupWMClass=io.github.alvin.Cuc

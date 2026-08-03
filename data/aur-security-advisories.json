@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-02",
+  "incident_active": true,
+  "advisory_url": "https://archlinux.org/news/active-aur-malicious-packages-incident/",
+  "notes": "Package names are sourced from confirmed Arch aur-general incident threads. This list is a safety backstop, not a complete malware detector.",
+  "affected_packages": [
+    {
+      "name": "browsh-bin",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/D2SHEO53A7V334VKQZ2SCHS37MHSBNHU/"
+    },
+    {
+      "name": "gnome-randr-rust",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/L2JXQNYBGWOQQQXDEPEAICBHKFEFANUC/"
+    },
+    {
+      "name": "ledger-udev-bin",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/NXRSPRSLSKPJMHIGFYK2BJPZWJCKJ2DS/"
+    },
+    {
+      "name": "libafterimage",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/LJSA3RFXMSOYUGKLT4S4JA7UTGCCK2B6/"
+    },
+    {
+      "name": "difi",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/LJSA3RFXMSOYUGKLT4S4JA7UTGCCK2B6/"
+    },
+    {
+      "name": "firefox-extension-adnauseam-bin-amo",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/LJSA3RFXMSOYUGKLT4S4JA7UTGCCK2B6/"
+    },
+    {
+      "name": "minitube",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/TB7P2TFGIJ6PHLWP6ZCQLRGAIXGNH55C/"
+    },
+    {
+      "name": "nextcloud-git",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-integration-google",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-repod",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-facerecognition",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-audioplayer",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-twofactor-gateway",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "nextcloud-app-gpoddersync",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-django-modelcluster",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-django-rest-knox",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-rembg",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-future",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-tradingeconomics",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-argdispatch",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "zing-8-bin",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    },
+    {
+      "name": "python-nipype",
+      "source": "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/ZVO6OVVS2SNJ6ZHPPQGPLGOD4AHHGFYS/"
+    }
+  ]
+}
