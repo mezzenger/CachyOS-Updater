@@ -7,7 +7,7 @@ This project is designed for CachyOS or another Arch-based system with Pacman.
 Install the base Python and terminal dependencies:
 
 ```sh
-sudo pacman -S python python-rich pacman-contrib
+sudo pacman -S python python-rich python-cryptography pacman-contrib
 ```
 
 For the desktop app, install GTK/libadwaita Python bindings:
@@ -70,8 +70,8 @@ For a reproducible per-user installation, run:
 ./scripts/install-user.sh
 ```
 
-This copies the application, AUR advisory data, and a launcher under the
-standard XDG user data location. Remove it with:
+This creates a versioned application directory plus a `current` symlink and
+launcher under the standard XDG user data location. Remove it with:
 
 ```sh
 ./scripts/uninstall-user.sh
@@ -79,7 +79,7 @@ standard XDG user data location. Remove it with:
 
 ## Optional Polkit Helper
 
-Pacman and Snap can use the desktop's native Polkit authentication flow. Review
+Pacman and Snap use the desktop's native Polkit authentication flow. Review
 the allowlisted helper and policy first, then install them as root:
 
 ```sh
@@ -109,3 +109,16 @@ Default preview cache:
 ```text
 ~/.cache/update-check-preview/
 ```
+
+## Arch Package
+
+The repository includes a `PKGBUILD` that installs both frontends, shared
+controller/provider modules, advisory and diagnostic support, the desktop
+launcher, and the Polkit helper and policy:
+
+```sh
+makepkg -si
+```
+
+Release builds expect a matching Git tag such as `v0.5.0`. Review the PKGBUILD
+and package contents before installation.

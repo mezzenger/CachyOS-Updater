@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import os
+import json
+import logging
 import signal
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-import cuc
+import cuc  # noqa: E402
 
 
 APP_ID = "io.github.alvin.Cuc"
@@ -32,30 +33,27 @@ SOURCE_ICONS = {
     "flatpak": "package-x-generic-symbolic",
     "snap": "system-run-symbolic",
 }
-AUTHENTICATION_TIMEOUT = 30
 POLKIT_HELPER = Path("/usr/lib/cachyos-update-center/cuc-privileged")
 
 
-def create_sudo_askpass() -> tuple[tempfile.TemporaryDirectory[str], str]:
-    """Create an askpass helper that reads from an inherited anonymous pipe."""
-    directory = tempfile.TemporaryDirectory(prefix="cuc-askpass-")
-    path = Path(directory.name) / "askpass.sh"
-    path.write_text(
-        "#!/bin/sh\n"
-        "IFS= read -r password <&\"${CUC_ASKPASS_FD:?}\"\n"
-        "printf '%s\\n' \"$password\"\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o700)
-    return directory, str(path)
+def secure_terminal_command(command: list[str]) -> list[str] | None:
+    """Wrap an interactive command without invoking a shell or carrying credentials."""
+    if shutil.which("kgx"):
+        return ["kgx", "--wait", "--", *command]
+    if shutil.which("gnome-terminal"):
+        return ["gnome-terminal", "--wait", "--", *command]
+    if shutil.which("xterm"):
+        return ["xterm", "-T", "CachyOS AUR Update", "-e", *command]
+    return None
 
 
 class SourceCard(Gtk.Box):
     """One compact update-source summary card."""
 
-    def __init__(self, source: str, on_install) -> None:
+    def __init__(self, source: str, on_review, on_install) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.source = source
+        self.on_review = on_review
         self.on_install = on_install
         self.add_css_class("source-card")
         self.set_hexpand(True)
@@ -114,9 +112,13 @@ class SourceCard(Gtk.Box):
         self.more_packages.connect("activate-link", self.show_all_packages)
         self.append(self.more_packages)
 
-        self.footer = Gtk.Box()
+        self.footer = Gtk.Box(spacing=8)
         self.footer.set_halign(Gtk.Align.END)
-        self.install_button = Gtk.Button(label="Install updates")
+        self.review_button = Gtk.Button(label="Review")
+        self.review_button.set_icon_name("view-list-symbolic")
+        self.review_button.connect("clicked", lambda *_: self.on_review(self.source))
+        self.footer.append(self.review_button)
+        self.install_button = Gtk.Button(label="Install now")
         self.install_button.set_icon_name("system-software-install-symbolic")
         self.install_button.add_css_class("primary-action")
         self.install_button.connect("clicked", lambda *_: self.on_install(self.source))
@@ -139,7 +141,7 @@ class SourceCard(Gtk.Box):
         self.has_updates = False
         self.more_packages.set_visible(False)
         self.footer.set_visible(False)
-        self.install_button.set_label("Review updates")
+        self.review_button.set_sensitive(False)
         self.install_button.set_sensitive(False)
 
     def update(self, result: cuc.UpdateResult) -> None:
@@ -154,11 +156,20 @@ class SourceCard(Gtk.Box):
         self.more_packages.set_visible(False)
         self.footer.set_visible(False)
 
+        if not result.enabled:
+            self.status.set_text("Disabled")
+            self.status.add_css_class("status-ok")
+            self.count.set_text("—")
+            self.detail.set_text("Enable this source in Settings to include it in update checks.")
+            self.review_button.set_sensitive(False)
+            self.install_button.set_sensitive(False)
+            return
         if not result.available_on_system:
             self.status.set_text("Not installed")
             self.status.add_css_class("status-error")
             self.count.set_text("—")
             self.detail.set_text(result.error or result.command_hint)
+            self.review_button.set_sensitive(False)
             self.install_button.set_sensitive(False)
             return
         if result.error:
@@ -166,6 +177,7 @@ class SourceCard(Gtk.Box):
             self.status.add_css_class("status-error")
             self.count.set_text("!")
             self.detail.set_text(result.error)
+            self.review_button.set_sensitive(False)
             self.install_button.set_sensitive(False)
             return
         if result.available:
@@ -194,47 +206,37 @@ class SourceCard(Gtk.Box):
             self.items.set_text("\n".join(preview))
             self.items.set_visible(True)
             self.footer.set_visible(True)
-            self.install_button.set_label("Review safety" if not result.install_allowed else "Review updates")
-            self.install_button.set_sensitive(True)
+            self.review_button.set_label("Review safety" if not result.install_allowed else "Review")
+            self.review_button.set_sensitive(True)
+            self.install_button.set_sensitive(result.install_allowed)
             return
 
         self.status.set_text("Up to date")
         self.status.add_css_class("status-ok")
         self.count.set_text("0")
         self.detail.set_text("Nothing pending from this source.")
+        self.review_button.set_sensitive(False)
         self.install_button.set_sensitive(False)
 
     def show_all_packages(self, _button: Gtk.LinkButton) -> bool:
         root = self.get_root()
-        dialog = Gtk.Dialog(
-            transient_for=root if isinstance(root, Gtk.Window) else None,
-            modal=True,
-            title=f"{self.source.upper() if self.source == 'aur' else self.source.capitalize()} updates",
+        dialog = Adw.AlertDialog(
+            heading=f"{self.source.upper() if self.source == 'aur' else self.source.capitalize()} updates",
+            body=f"{len(self.all_packages)} packages available",
         )
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        install_button = dialog.add_button("Review selection", Gtk.ResponseType.ACCEPT)
-        install_button.add_css_class("primary-action")
+        dialog.add_response("close", "Close")
+        dialog.add_response("review", "Review selection")
+        dialog.set_response_appearance("review", Adw.ResponseAppearance.SUGGESTED)
         result_can_install = bool(self.has_updates)
-        install_button.set_sensitive(result_can_install)
-        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
-        dialog.set_default_size(620, 500)
+        dialog.set_response_enabled("review", result_can_install)
+        dialog.set_default_response("review")
+        dialog.set_close_response("close")
 
-        def respond(current: Gtk.Dialog, response: int) -> None:
-            current.close()
-            if response == Gtk.ResponseType.ACCEPT and self.has_updates:
-                self.on_install(self.source)
+        def respond(_current: Adw.AlertDialog, response: str) -> None:
+            if response == "review" and self.has_updates:
+                self.on_review(self.source)
 
         dialog.connect("response", respond)
-
-        content = dialog.get_content_area()
-        content.set_spacing(12)
-        content.set_margin_top(18)
-        content.set_margin_bottom(18)
-        content.set_margin_start(18)
-        content.set_margin_end(18)
-        title = Gtk.Label(label=f"{len(self.all_packages)} packages available", xalign=0)
-        title.add_css_class("title-3")
-        content.append(title)
 
         packages = Gtk.TextView()
         packages.set_editable(False)
@@ -246,18 +248,19 @@ class SourceCard(Gtk.Box):
         scroll.set_hexpand(True)
         scroll.set_vexpand(True)
         scroll.set_child(packages)
-        content.append(scroll)
-        dialog.present()
-        install_button.grab_focus()
+        scroll.set_size_request(600, 420)
+        dialog.set_extra_child(scroll)
+        dialog.present(root if isinstance(root, Gtk.Widget) else None)
         return True
 
 
-class SettingsWindow(Adw.PreferencesWindow):
+class SettingsWindow(Adw.PreferencesDialog):
     """Editable front end for CUC's persistent configuration."""
 
-    def __init__(self, parent: Gtk.Window, config: cuc.Config, on_saved) -> None:
-        super().__init__(transient_for=parent, modal=True, title="Cachy Update Center Settings")
-        self.set_default_size(620, 620)
+    def __init__(self, config: cuc.Config, on_saved) -> None:
+        super().__init__(title="Cachy Update Center Settings")
+        self.set_content_width(620)
+        self.set_content_height(620)
         self.on_saved = on_saved
         self.current_config = config
 
@@ -292,6 +295,66 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.timeout.set_value(config.command_timeout)
         general.add(self.timeout)
 
+        self.installation_timeout = Adw.SpinRow.new_with_range(60, 14400, 60)
+        self.installation_timeout.set_title("Installation timeout")
+        self.installation_timeout.set_subtitle(
+            "Maximum runtime, in seconds, for each selected update source."
+        )
+        self.installation_timeout.set_value(config.installation_timeout)
+        general.add(self.installation_timeout)
+
+        self.max_result_age = Adw.SpinRow.new_with_range(1, 1440, 1)
+        self.max_result_age.set_title("Result freshness")
+        self.max_result_age.set_subtitle(
+            "Refresh before installation when results are older than this many minutes."
+        )
+        self.max_result_age.set_value(config.max_result_age_minutes)
+        general.add(self.max_result_age)
+
+        self.minimum_free_space = Adw.SpinRow.new_with_range(128, 65536, 128)
+        self.minimum_free_space.set_title("Minimum free disk space")
+        self.minimum_free_space.set_subtitle(
+            "Block installation below this many MiB of free space."
+        )
+        self.minimum_free_space.set_value(config.minimum_free_space_mb)
+        general.add(self.minimum_free_space)
+
+        self.notifications_enabled = Adw.SwitchRow(
+            title="Desktop notifications",
+            subtitle="Notify when checks or installations finish or need attention.",
+        )
+        self.notifications_enabled.set_active(config.notifications_enabled)
+        general.add(self.notifications_enabled)
+
+        sources = Adw.PreferencesGroup(
+            title="Update sources",
+            description="Disabled sources are skipped and shown as disabled on the dashboard.",
+        )
+        page.add(sources)
+        self.source_switches: dict[str, Adw.SwitchRow] = {}
+        for source in SOURCE_ORDER:
+            row = Adw.SwitchRow(
+                title=cuc.SOURCE_DISPLAY_NAMES[source],
+                subtitle=f"Check and install updates from {cuc.SOURCE_DISPLAY_NAMES[source]}.",
+            )
+            row.set_active(config.enabled_sources.get(source, True))
+            sources.add(row)
+            self.source_switches[source] = row
+
+        polkit = cuc.check_polkit_readiness()
+        integration = Adw.PreferencesGroup(title="Authentication")
+        page.add(integration)
+        polkit_row = Adw.ActionRow(
+            title="Native Polkit integration",
+            subtitle=polkit.message,
+        )
+        polkit_row.add_prefix(
+            Gtk.Image.new_from_icon_name(
+                "emblem-ok-symbolic" if polkit.ready else "dialog-warning-symbolic"
+            )
+        )
+        integration.add(polkit_row)
+
         voice = Adw.PreferencesGroup(title="Piper voice")
         page.add(voice)
         self.voice_labels, self.voice_model_paths = self.discover_voice_models(config.piper_model)
@@ -322,6 +385,55 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.log_file = Adw.EntryRow(title="Log file")
         self.log_file.set_text(config.log_file)
         storage.add(self.log_file)
+
+        advisories = Adw.PreferencesGroup(
+            title="AUR security advisories",
+            description=(
+                "Optional automatic security data from a trusted publisher. "
+                "Configure all three signed-feed fields together, or leave all three blank."
+            ),
+        )
+        page.add(advisories)
+        self.advisory_cache_file = Adw.EntryRow(title="Authenticated advisory cache")
+        self.advisory_cache_file.set_text(config.advisory_cache_file)
+        self.advisory_cache_file.set_tooltip_text(
+            "Local cache used for verified AUR security advisory data."
+        )
+        advisories.add(self.advisory_cache_file)
+
+        def advisory_entry(title: str, subtitle: str) -> tuple[Adw.ActionRow, Gtk.Entry]:
+            row = Adw.ActionRow(title=title, subtitle=subtitle)
+            entry = Gtk.Entry()
+            entry.set_hexpand(True)
+            entry.set_valign(Gtk.Align.CENTER)
+            entry.set_width_chars(34)
+            row.add_suffix(entry)
+            row.set_activatable_widget(entry)
+            return row, entry
+
+        feed_row, self.advisory_feed_url = advisory_entry(
+            "Signed advisory feed URL",
+            "HTTPS address of the advisory JSON from a trusted publisher.",
+        )
+        self.advisory_feed_url.set_text(config.advisory_feed_url)
+        advisories.add(feed_row)
+        signature_row, self.advisory_signature_url = advisory_entry(
+            "Advisory signature URL",
+            "HTTPS address of the detached Ed25519 signature for the feed.",
+        )
+        self.advisory_signature_url.set_text(config.advisory_signature_url)
+        advisories.add(signature_row)
+        key_row, self.advisory_public_key_file = advisory_entry(
+            "Advisory public key file",
+            "Absolute path to the trusted Ed25519 public key used for verification.",
+        )
+        self.advisory_public_key_file.set_text(config.advisory_public_key_file)
+        advisories.add(key_row)
+        self.advisory_refresh_hours = Adw.SpinRow.new_with_range(1, 168, 1)
+        self.advisory_refresh_hours.set_title("Advisory refresh interval")
+        self.advisory_refresh_hours.set_subtitle("Hours between signed advisory refresh attempts.")
+        self.advisory_refresh_hours.set_value(config.advisory_refresh_hours)
+        advisories.add(self.advisory_refresh_hours)
 
         action_group = Adw.PreferencesGroup()
         page.add(action_group)
@@ -390,14 +502,39 @@ class SettingsWindow(Adw.PreferencesWindow):
             return str(Path(value).expanduser()) if "path" in label.lower() or "directory" in label.lower() or "file" in label.lower() else value
 
         try:
+            advisory_settings = cuc.validate_signed_advisory_settings(
+                self.advisory_feed_url.get_text(),
+                self.advisory_signature_url.get_text(),
+                self.advisory_public_key_file.get_text(),
+            )
+            if advisory_settings[2] and not Path(advisory_settings[2]).is_file():
+                raise ValueError(
+                    "The signed advisory public key file does not exist or is not a regular file."
+                )
             config = cuc.Config(
                 voice_enabled=self.voice_enabled.get_active(),
                 spoken_name=required(self.spoken_name, "Spoken name"),
                 aur_helper=self.aur_helpers[self.aur_helper.get_selected()],
                 command_timeout=int(self.timeout.get_value()),
+                installation_timeout=int(self.installation_timeout.get_value()),
+                max_result_age_minutes=int(self.max_result_age.get_value()),
+                minimum_free_space_mb=int(self.minimum_free_space.get_value()),
                 piper_model=self.selected_voice_model(),
                 preview_dir=required(self.preview_dir, "Preview cache directory"),
                 log_file=required(self.log_file, "Log file"),
+                advisory_cache_file=required(
+                    self.advisory_cache_file,
+                    "Advisory cache file",
+                ),
+                advisory_feed_url=advisory_settings[0],
+                advisory_signature_url=advisory_settings[1],
+                advisory_public_key_file=advisory_settings[2],
+                advisory_refresh_hours=int(self.advisory_refresh_hours.get_value()),
+                notifications_enabled=self.notifications_enabled.get_active(),
+                enabled_sources={
+                    source: row.get_active()
+                    for source, row in self.source_switches.items()
+                },
             )
             config.save(cuc.DEFAULT_CONFIG_PATH)
         except (OSError, ValueError) as exc:
@@ -415,14 +552,22 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.set_size_request(460, 480)
         self.config_warning: str | None = None
         self.config = self.load_config()
+        cuc.configure_logging(Path(self.config.log_file))
+        logging.info("Desktop application started")
+        polkit = cuc.check_polkit_readiness()
+        logging.info("Polkit readiness ready=%s message=%s", polkit.ready, polkit.message)
         self.state: cuc.AppState | None = None
         self.check_in_progress = False
         self.update_in_progress = False
         self.session = cuc.UpdateSession()
+        self.session_state_path = Path(self.config.log_file).with_name("last-session.json")
+        self.recovery_warning = self.load_recovery_warning()
         self.active_process: subprocess.Popen[str] | None = None
         self.cancel_event: threading.Event | None = None
         self.process_lock = threading.Lock()
         self.cards: dict[str, SourceCard] = {}
+        self.last_install_summary = cuc.InstallSummary()
+        self.pending_install_summary = False
 
         toolbar_view = Adw.ToolbarView()
         self.set_content(toolbar_view)
@@ -433,12 +578,28 @@ class UpdateWindow(Adw.ApplicationWindow):
             "audio-volume-high-symbolic" if self.config.voice_enabled else "audio-volume-muted-symbolic"
         )
         self.voice_button.set_tooltip_text("Repeat update status with Piper")
+        self.voice_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Repeat spoken update status"],
+        )
         self.voice_button.connect("clicked", lambda *_: self.announce_current_status(manual=True))
         header.pack_end(self.voice_button)
         settings_button = Gtk.Button.new_from_icon_name("emblem-system-symbolic")
-        settings_button.set_tooltip_text("Settings")
+        settings_button.set_tooltip_text("Settings (Ctrl+,)")
+        settings_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Open update settings"],
+        )
         settings_button.connect("clicked", lambda *_: self.open_settings())
         header.pack_end(settings_button)
+        about_button = Gtk.Button.new_from_icon_name("help-about-symbolic")
+        about_button.set_tooltip_text("About Cachy Update Center")
+        about_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["About Cachy Update Center"],
+        )
+        about_button.connect("clicked", lambda *_: self.show_about())
+        header.pack_end(about_button)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -479,25 +640,38 @@ class UpdateWindow(Adw.ApplicationWindow):
         actions.set_hexpand(True)
         actions.set_halign(Gtk.Align.END)
         self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-        self.refresh_button.set_tooltip_text("Refresh update status")
+        self.refresh_button.set_tooltip_text("Refresh update status (Ctrl+R)")
+        self.refresh_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Refresh update status"],
+        )
         self.refresh_button.add_css_class("circular")
         self.refresh_button.set_valign(Gtk.Align.CENTER)
         self.refresh_button.connect("clicked", lambda *_: self.refresh())
         actions.append(self.refresh_button)
-        self.install_all_button = Gtk.Button(label="Review updates")
+        self.review_all_button = Gtk.Button(label="Review updates")
+        self.review_all_button.set_icon_name("view-list-symbolic")
+        self.review_all_button.set_valign(Gtk.Align.CENTER)
+        self.review_all_button.set_sensitive(False)
+        self.review_all_button.set_visible(False)
+        self.review_all_button.set_tooltip_text("Review all pending packages (Ctrl+U)")
+        self.review_all_button.connect("clicked", lambda *_: self.confirm_install(None))
+        actions.append(self.review_all_button)
+        self.install_all_button = Gtk.Button(label="Update all")
         self.install_all_button.set_icon_name("system-software-install-symbolic")
         self.install_all_button.add_css_class("primary-action")
         self.install_all_button.set_valign(Gtk.Align.CENTER)
         self.install_all_button.set_sensitive(False)
         self.install_all_button.set_visible(False)
-        self.install_all_button.connect("clicked", lambda *_: self.confirm_install(None))
+        self.install_all_button.set_tooltip_text("Install all eligible updates")
+        self.install_all_button.connect("clicked", lambda *_: self.confirm_install_now(None))
         actions.append(self.install_all_button)
         hero.append(actions)
         page.append(hero)
 
         workflow = Gtk.Box(spacing=10)
         workflow.add_css_class("workflow")
-        for number, title in (("1", "Check"), ("2", "Review"), ("3", "Install")):
+        for number, title in (("1", "Check"), ("2", "Review (optional)"), ("3", "Install")):
             step = Gtk.Box(spacing=6)
             number_label = Gtk.Label(label=number)
             number_label.add_css_class("step-number")
@@ -514,6 +688,8 @@ class UpdateWindow(Adw.ApplicationWindow):
         page.append(self.notice)
         if self.config_warning:
             self.show_notice(self.config_warning)
+        if self.recovery_warning:
+            self.show_notice(self.recovery_warning)
 
         self.security_notice = Gtk.Label(xalign=0, wrap=True)
         self.security_notice.add_css_class("security-banner")
@@ -530,6 +706,13 @@ class UpdateWindow(Adw.ApplicationWindow):
         source_text.append(source_title)
         source_text.append(self.source_summary)
         source_header.append(source_text)
+        self.retry_button = Gtk.Button(label="Retry failed")
+        self.retry_button.set_icon_name("view-refresh-symbolic")
+        self.retry_button.set_halign(Gtk.Align.END)
+        self.retry_button.set_hexpand(True)
+        self.retry_button.set_visible(False)
+        self.retry_button.connect("clicked", lambda *_: self.retry_failed_sources())
+        source_header.append(self.retry_button)
         page.append(source_header)
 
         grid = Gtk.FlowBox()
@@ -541,7 +724,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         grid.set_homogeneous(True)
         grid.set_valign(Gtk.Align.START)
         for source in SOURCE_ORDER:
-            card = SourceCard(source, self.confirm_install)
+            card = SourceCard(source, self.confirm_install, self.confirm_install_now)
             self.cards[source] = card
             grid.append(card)
         page.append(grid)
@@ -555,6 +738,12 @@ class UpdateWindow(Adw.ApplicationWindow):
         version.add_css_class("dim-label")
         version.set_tooltip_text("CachyOS Update Center version")
         footer.append(version)
+        export_diagnostics = Gtk.Button(label="Export diagnostics")
+        export_diagnostics.set_tooltip_text(
+            "Create a privacy-safe support bundle in the preview cache directory (Ctrl+D)"
+        )
+        export_diagnostics.connect("clicked", lambda *_: self.export_diagnostic_bundle())
+        footer.append(export_diagnostics)
         open_terminal = Gtk.Button(label="Open terminal")
         open_terminal.set_halign(Gtk.Align.END)
         open_terminal.set_hexpand(True)
@@ -563,6 +752,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         toolbar_view.add_bottom_bar(footer)
 
         self.install_css()
+        self.install_keyboard_shortcuts(application)
         self.refresh()
 
     def load_config(self) -> cuc.Config:
@@ -571,6 +761,43 @@ class UpdateWindow(Adw.ApplicationWindow):
         except cuc.ConfigError as exc:
             self.config_warning = f"Configuration could not be read; using defaults for this session. {exc}"
             return cuc.Config()
+
+    def load_recovery_warning(self) -> str | None:
+        try:
+            payload = json.loads(self.session_state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        phase = payload.get("phase")
+        if phase not in (cuc.SessionPhase.INSTALLING.value, cuc.SessionPhase.CANCELLING.value):
+            return None
+        targets = payload.get("targets")
+        source_text = ", ".join(targets) if isinstance(targets, list) else "unknown sources"
+        logging.warning("Recovered interrupted update session phase=%s targets=%s", phase, source_text)
+        return (
+            "The previous update session ended unexpectedly while processing "
+            f"{source_text}. Refresh and verify package-manager state before starting another update."
+        )
+
+    def persist_session(self, event: str) -> None:
+        payload = {
+            "version": cuc.__version__,
+            "event": event,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            **self.session.to_dict(),
+        }
+        temporary = self.session_state_path.with_suffix(".json.tmp")
+        try:
+            self.session_state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(self.session_state_path)
+        except OSError as exc:
+            logging.warning("Could not persist update session state: %s", exc)
+        logging.info(
+            "Update session transition event=%s phase=%s targets=%s",
+            event,
+            self.session.phase.value,
+            ",".join(self.session.targets),
+        )
 
     def install_css(self) -> None:
         css = b"""
@@ -685,39 +912,99 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.notice.set_text(message)
         self.notice.set_visible(True)
 
+    def install_keyboard_shortcuts(self, application: Adw.Application) -> None:
+        shortcuts = {
+            "refresh": (lambda: self.refresh(), ["<Primary>r"]),
+            "settings": (self.open_settings, ["<Primary>comma"]),
+            "review": (lambda: self.confirm_install(None), ["<Primary>u"]),
+            "diagnostics": (self.export_diagnostic_bundle, ["<Primary>d"]),
+        }
+        for name, (callback, accelerators) in shortcuts.items():
+            action = Gio.SimpleAction.new(name, None)
+            action.connect(
+                "activate",
+                lambda _action, _parameter, callback=callback: callback(),
+            )
+            self.add_action(action)
+            application.set_accels_for_action(f"win.{name}", accelerators)
+
+    def send_notification(self, title: str, body: str) -> None:
+        if not self.config.notifications_enabled:
+            return
+        application = self.get_application()
+        if not isinstance(application, Gio.Application):
+            return
+        notification = Gio.Notification.new(title)
+        notification.set_body(body)
+        application.send_notification(None, notification)
+
+    def retry_failed_sources(self) -> None:
+        if not self.state:
+            return
+        failed_sources = cuc.UPDATE_CONTROLLER.retry_sources(self.state.results)
+        if failed_sources:
+            self.refresh(failed_sources, preserve_results=True)
+
     def set_overview_badge(self, text: str, style: str) -> None:
         for css_class in ("overview-checking", "overview-ready", "overview-current", "overview-error"):
             self.overview_badge.remove_css_class(css_class)
         self.overview_badge.set_text(text)
         self.overview_badge.add_css_class(style)
 
-    def refresh(self) -> None:
+    def refresh(
+        self,
+        sources: list[str] | None = None,
+        *,
+        preserve_results: bool = False,
+    ) -> None:
         if self.update_in_progress:
             self.show_notice("Wait for the current update session to finish before refreshing.")
             return
         if self.check_in_progress:
             return
         self.check_in_progress = True
-        self.state = None
+        prior_state = self.state if preserve_results else None
+        if not preserve_results:
+            self.state = None
         self.refresh_button.set_sensitive(False)
+        self.retry_button.set_sensitive(False)
+        self.review_all_button.set_sensitive(False)
+        self.review_all_button.set_visible(False)
         self.install_all_button.set_sensitive(False)
         self.install_all_button.set_visible(False)
-        self.install_all_button.set_label("Review updates")
+        self.review_all_button.set_label("Review updates")
+        self.install_all_button.set_label("Update all")
         self.notice.set_visible(False)
         self.security_notice.set_visible(False)
         if self.config_warning:
             self.show_notice(self.config_warning)
-        self.headline.set_text("Checking your system")
-        self.subheadline.set_text("Pacman, AUR, Flatpak, and Snap are being checked in parallel.")
+        source_names = sources or list(SOURCE_ORDER)
+        display_sources = ", ".join(cuc.SOURCE_DISPLAY_NAMES[source] for source in source_names)
+        self.headline.set_text("Retrying failed sources" if preserve_results else "Checking your system")
+        self.subheadline.set_text(f"{display_sources} {'are' if len(source_names) != 1 else 'is'} being checked.")
         self.set_overview_badge("Checking", "overview-checking")
-        self.source_summary.set_text("Checking Pacman, AUR, Flatpak, and Snap")
-        for card in self.cards.values():
-            card.show_checking()
-        threading.Thread(target=self._check_worker, daemon=True).start()
+        self.source_summary.set_text(f"Checking {display_sources}")
+        for source in source_names:
+            if source in self.cards:
+                self.cards[source].show_checking()
+        threading.Thread(
+            target=self._check_worker,
+            args=(sources, prior_state),
+            daemon=True,
+        ).start()
 
-    def _check_worker(self) -> None:
+    def _check_worker(
+        self,
+        sources: list[str] | None,
+        prior_state: cuc.AppState | None,
+    ) -> None:
         try:
-            state = cuc.check_all_parallel(self.config, show_progress=False)
+            results = cuc.UPDATE_CONTROLLER.check(
+                self.config,
+                sources=sources,
+                prior_results=prior_state.results if prior_state else None,
+            )
+            state = cuc.AppState(results)
             GLib.idle_add(self._finish_refresh, state, None)
         except Exception as exc:  # defensive boundary between worker and UI
             GLib.idle_add(self._finish_refresh, None, str(exc))
@@ -725,27 +1012,47 @@ class UpdateWindow(Adw.ApplicationWindow):
     def _finish_refresh(self, state: cuc.AppState | None, error: str | None) -> bool:
         self.check_in_progress = False
         self.refresh_button.set_sensitive(True)
+        self.retry_button.set_sensitive(True)
         if error or state is None:
+            logging.error("Desktop update check failed: %s", error or "unknown error")
             self.headline.set_text("Update check failed")
             self.subheadline.set_text("Try refreshing again. No update action has been started.")
             self.set_overview_badge("Check failed", "overview-error")
             self.source_summary.set_text("No update actions are available until the next successful check")
             self.show_notice(error or "Unknown update check error")
+            self.send_notification("Update check failed", error or "Unknown update check error")
             return False
 
         self.state = state
+        for result in state.results.values():
+            logging.info(
+                "Check result source=%s enabled=%s available=%s count=%s allowed=%s error=%r",
+                result.source,
+                result.enabled,
+                result.available,
+                result.count,
+                result.install_allowed,
+                result.error,
+            )
         for source in SOURCE_ORDER:
             result = state.results.get(source)
             if result:
                 self.cards[source].update(result)
         total = sum(result.count for result in state.results.values())
         failures = state.failed_results()
+        self.retry_button.set_visible(bool(failures))
         unavailable = state.unavailable_results()
-        targets = [source for source, result in state.results.items() if result.available]
+        targets = state.installable_sources()
+        installable_total = sum(state.results[source].count for source in targets)
+        self.review_all_button.set_sensitive(bool(total))
+        self.review_all_button.set_visible(bool(total))
         self.install_all_button.set_sensitive(bool(targets))
         self.install_all_button.set_visible(bool(targets))
-        if total:
-            self.install_all_button.set_label(f"Review {total} update{'s' if total != 1 else ''}")
+        if installable_total:
+            self.review_all_button.set_label(
+                f"Review {total} update{'s' if total != 1 else ''}"
+            )
+            self.install_all_button.set_label("Update all")
         self.last_checked.set_text(f"Last checked {datetime.now().strftime('%H:%M')}")
         security_warnings = [
             warning
@@ -764,16 +1071,36 @@ class UpdateWindow(Adw.ApplicationWindow):
             self.set_overview_badge("Needs attention", "overview-error")
             self.source_summary.set_text("Install actions are available only for sources checked successfully")
             self.show_notice("Updates are only available for sources that completed successfully.")
+            self.send_notification(
+                "Update check needs attention",
+                "Could not check: " + ", ".join(result.display_name for result in failures),
+            )
         elif total:
-            self.headline.set_text(f"{total} update{'s' if total != 1 else ''} ready")
-            self.subheadline.set_text("Review package and safety details before installing.")
-            self.set_overview_badge("Ready to install", "overview-ready")
             blocked = [result for result in state.results.values() if result.available and not result.install_allowed]
             suffix = f"; {len(blocked)} source blocked by safety checks" if blocked else ""
-            self.source_summary.set_text(
-                f"{total} pending update{'s' if total != 1 else ''} across "
-                f"{len(targets)} source{'s' if len(targets) != 1 else ''}{suffix}"
-            )
+            if installable_total:
+                self.headline.set_text(
+                    f"{installable_total} installable update{'s' if installable_total != 1 else ''}"
+                )
+                self.subheadline.set_text("Review package details, or update all eligible sources now.")
+                self.set_overview_badge("Ready to install", "overview-ready")
+                self.source_summary.set_text(
+                    f"{installable_total} installable update{'s' if installable_total != 1 else ''} across "
+                    f"{len(targets)} source{'s' if len(targets) != 1 else ''}{suffix}"
+                )
+                self.send_notification(
+                    "Updates are ready",
+                    self.source_summary.get_text(),
+                )
+            else:
+                self.headline.set_text("Updates require safety review")
+                self.subheadline.set_text("No pending source is currently installable.")
+                self.set_overview_badge("Blocked", "overview-error")
+                self.source_summary.set_text(
+                    f"{total} pending update{'s' if total != 1 else ''}; "
+                    "all affected sources are blocked by safety checks"
+                )
+                self.send_notification("Updates blocked", self.source_summary.get_text())
         else:
             self.headline.set_text("Everything is current")
             suffix = f" Unavailable: {', '.join(result.display_name for result in unavailable)}." if unavailable else ""
@@ -781,6 +1108,9 @@ class UpdateWindow(Adw.ApplicationWindow):
             self.set_overview_badge("All current", "overview-current")
             self.source_summary.set_text("No updates are waiting to be installed")
         self.announce_current_status()
+        if self.pending_install_summary:
+            self.show_notice(self.last_install_summary.message())
+            self.pending_install_summary = False
         return False
 
     def announce_current_status(self, *, manual: bool = False) -> None:
@@ -793,20 +1123,36 @@ class UpdateWindow(Adw.ApplicationWindow):
             cuc.speak_async(cuc.compose_summary_speech(self.state, self.config), self.config)
 
     def open_settings(self) -> None:
-        SettingsWindow(self, self.config, self.apply_settings).present()
+        SettingsWindow(self.config, self.apply_settings).present(self)
+
+    def show_about(self) -> None:
+        dialog = Adw.AboutDialog(
+            application_name="Cachy Update Center",
+            application_icon="software-update-available-symbolic",
+            developer_name="Alvin and contributors",
+            version=cuc.__version__,
+            website="https://github.com/alvin/CachyOS-Updater",
+            issue_url="https://github.com/alvin/CachyOS-Updater/issues",
+            copyright="© 2026 Alvin",
+        )
+        dialog.set_developers(["Alvin"])
+        dialog.add_credit_section(
+            "Engineering assistance",
+            ["OpenAI Codex — v0.5.0 reliability and security upgrade"],
+        )
+        dialog.present(self)
 
     def apply_settings(self, config: cuc.Config) -> None:
         self.config = config
+        cuc.configure_logging(Path(config.log_file))
+        self.session_state_path = Path(config.log_file).with_name("last-session.json")
         self.voice_button.set_icon_name(
             "audio-volume-high-symbolic" if config.voice_enabled else "audio-volume-muted-symbolic"
         )
         self.show_notice("Settings saved. The next refresh will use the new configuration.")
 
     def confirm_install(self, source: str | None) -> None:
-        if self.update_in_progress or self.session.phase in (
-            cuc.SessionPhase.REVIEWING,
-            cuc.SessionPhase.AUTHENTICATING,
-        ):
+        if self.update_in_progress or self.session.phase == cuc.SessionPhase.REVIEWING:
             self.show_notice("An update session is already running.")
             return
         if not self.state:
@@ -814,74 +1160,186 @@ class UpdateWindow(Adw.ApplicationWindow):
         if source:
             targets = [source]
         else:
-            targets = [name for name, result in self.state.results.items() if result.available]
+            targets = [
+                source
+                for source in SOURCE_ORDER
+                if source in self.state.results and self.state.results[source].available
+            ]
         if not targets:
             return
-        self.show_install_review(targets)
+        self.show_install_review(targets, include_excluded=source is None)
 
-    def show_install_review(self, targets: list[str]) -> None:
+    def confirm_install_now(self, source: str | None) -> None:
+        if self.update_in_progress or self.session.phase == cuc.SessionPhase.REVIEWING:
+            self.show_notice("An update session is already running.")
+            return
+        if not self.state:
+            return
+        installable = self.state.installable_sources()
+        if source:
+            targets = [source] if source in installable else []
+        else:
+            targets = installable
+        if not targets:
+            return
+        if not self.session.begin_review(targets):
+            self.show_notice("An update session is already running.")
+            return
+        self.persist_session("approval-started")
+        total = sum(self.state.results[source].count for source in targets)
+        source_names = ", ".join(self.state.results[source].display_name for source in targets)
+        install_label = "Install now" if source else "Install all"
+        dialog = Adw.AlertDialog(
+            heading=f"Install {total} update{'s' if total != 1 else ''}?",
+            body=(
+                f"Eligible updates from {source_names} will be installed. "
+                "You can continue without opening the optional package review."
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("install", install_label)
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("install")
+        dialog.set_close_response("cancel")
+
+        def respond(_current: Adw.AlertDialog, response: str) -> None:
+            if response == "install":
+                self.launch_updates(targets)
+            else:
+                self.session.reset()
+                self.persist_session("approval-cancelled")
+
+        dialog.connect("response", respond)
+        dialog.present(self)
+
+    def show_install_review(
+        self,
+        targets: list[str],
+        *,
+        include_excluded: bool = False,
+    ) -> None:
         if not self.state:
             return
         if not self.session.begin_review(targets):
             self.show_notice("Finish or close the current update review before starting another.")
             return
+        self.persist_session("review-started")
         results = [self.state.results[source] for source in targets if source in self.state.results]
-        blocked = [result for result in results if not result.install_allowed]
-        total = sum(result.count for result in results)
 
-        dialog = Gtk.Dialog(transient_for=self, modal=True, title="Review updates")
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        continue_button = dialog.add_button("Install reviewed updates", Gtk.ResponseType.ACCEPT)
-        continue_button.add_css_class("primary-action")
-        continue_button.set_sensitive(not blocked)
-        dialog.set_default_response(Gtk.ResponseType.ACCEPT if not blocked else Gtk.ResponseType.CANCEL)
-        dialog.set_default_size(640, 440)
+        dialog = Adw.AlertDialog(heading="Review updates")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("install", "Install reviewed updates")
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("install")
+        dialog.set_close_response("cancel")
 
-        content = dialog.get_content_area()
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         content.set_spacing(14)
-        content.set_margin_top(20)
-        content.set_margin_bottom(20)
-        content.set_margin_start(20)
-        content.set_margin_end(20)
+        content.set_size_request(600, -1)
 
-        title = Gtk.Label(
-            label=f"{total} update{'s' if total != 1 else ''} from "
-            f"{len(results)} source{'s' if len(results) != 1 else ''}",
-            xalign=0,
-        )
+        title = Gtk.Label(xalign=0)
         title.add_css_class("title-2")
         content.append(title)
         content.append(
             Gtk.Label(
-                label="Nothing has been installed yet. Confirm the sources and safety findings below.",
+                label="Choose the sources to install. Nothing starts until you confirm below.",
                 xalign=0,
                 wrap=True,
             )
         )
 
-        review_lines: list[str] = []
+        selections: dict[str, Gtk.CheckButton] = {}
         for result in results:
-            review_lines.append(f"{result.display_name} — {result.count} update(s)")
-            review_lines.extend(f"  • {warning}" for warning in result.security_warnings)
-        if blocked:
-            review_lines.append("")
-            review_lines.append(
-                "Installation is blocked. Resolve the AUR safety findings and refresh before trying again."
+            check = Gtk.CheckButton(
+                label=f"{result.display_name} — {result.count} update(s)"
             )
-        review = Gtk.Label(label="\n".join(review_lines), xalign=0, wrap=True, selectable=True)
-        review.add_css_class("package-preview")
-        review.set_vexpand(True)
-        content.append(review)
+            check.set_active(result.install_allowed and not result.error)
+            check.set_sensitive(result.install_allowed and not result.error)
+            content.append(check)
+            selections[result.source] = check
+            packages = Gtk.Label(
+                label="\n".join(f"• {item}" for item in result.items) or "• Package details unavailable",
+                xalign=0,
+                wrap=True,
+                selectable=True,
+            )
+            packages.add_css_class("package-preview")
+            packages.set_margin_start(24)
+            content.append(packages)
+            details = list(result.security_warnings)
+            if result.security_advisory_updated_at:
+                details.append(
+                    f"Advisory data updated: {result.security_advisory_updated_at}"
+                )
+            if result.security_advisory_url:
+                details.append(f"Advisory: {result.security_advisory_url}")
+            if result.source == "aur":
+                details.append(f"Safety metadata checked: {result.checked_at}")
+            if details:
+                detail = Gtk.Label(
+                    label="\n".join(f"• {line}" for line in details),
+                    xalign=0,
+                    wrap=True,
+                    selectable=True,
+                )
+                detail.add_css_class("package-preview")
+                detail.set_margin_start(24)
+                content.append(detail)
 
-        def respond(current: Gtk.Dialog, response: int) -> None:
-            current.close()
-            if response == Gtk.ResponseType.ACCEPT and not blocked:
-                self.launch_updates(targets)
+        if include_excluded:
+            excluded = [
+                result
+                for result in self.state.results.values()
+                if result.available and result.source not in selections
+            ]
+            if excluded:
+                excluded_text = Gtk.Label(
+                    label="Not selected because installation is blocked or its check failed:\n"
+                    + "\n".join(
+                        f"• {result.display_name}: "
+                        f"{result.security_warnings[0] if result.security_warnings else result.error or 'not installable'}"
+                        for result in excluded
+                    ),
+                    xalign=0,
+                    wrap=True,
+                )
+                excluded_text.add_css_class("security-banner")
+                content.append(excluded_text)
+
+        def selected_targets() -> list[str]:
+            return [
+                source for source, check in selections.items() if check.get_active()
+            ]
+
+        def update_selection(*_args) -> None:
+            selected = selected_targets()
+            total = sum(self.state.results[source].count for source in selected)
+            title.set_text(
+                f"{total} update{'s' if total != 1 else ''} from "
+                f"{len(selected)} source{'s' if len(selected) != 1 else ''}"
+            )
+            dialog.set_response_enabled("install", bool(selected))
+
+        for check in selections.values():
+            check.connect("toggled", update_selection)
+        update_selection()
+
+        def respond(_current: Adw.AlertDialog, response: str) -> None:
+            selected = selected_targets()
+            if response == "install" and selected:
+                self.session.targets = selected
+                self.launch_updates(selected)
             else:
                 self.session.reset()
+                self.persist_session("review-cancelled")
 
         dialog.connect("response", respond)
-        dialog.present()
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_min_content_height(420)
+        scroll.set_child(content)
+        dialog.set_extra_child(scroll)
+        dialog.present(self)
 
     def launch_updates(self, targets: list[str]) -> None:
         if self.update_in_progress:
@@ -897,36 +1355,117 @@ class UpdateWindow(Adw.ApplicationWindow):
                 self.session.reset()
                 self.show_notice("Safety checks blocked one or more selected update sources.")
                 return
-        commands = cuc.build_update_commands(targets, self.config, noninteractive=True)
-        if "aur" not in targets and POLKIT_HELPER.is_file() and cuc.command_exists("pkexec"):
-            polkit_sources = {"pacman": "pacman", "snap": "snap"}
-            commands = [
-                ["pkexec", str(POLKIT_HELPER), polkit_sources[command[1]]]
-                if command and command[0] == "sudo" and command[1] in polkit_sources
-                else command
-                for command in commands
-            ]
-        if not commands:
+        assert self.state is not None
+        preflight_issues = cuc.check_update_preflight(targets, self.state, self.config)
+        for issue in preflight_issues:
+            log = logging.error if issue.blocking else logging.warning
+            log("Update preflight %s: %s", issue.code, issue.message)
+        blocking_issues = [issue for issue in preflight_issues if issue.blocking]
+        if blocking_issues:
+            message = "Preflight blocked installation:\n" + "\n".join(
+                f"• {issue.message}" for issue in blocking_issues
+            )
+            if any(issue.code == "package-manager-running" for issue in blocking_issues):
+                self.show_preflight_retry(targets, message)
+                self.send_notification("Update preflight failed", blocking_issues[0].message)
+                return
             self.session.reset()
-            self.show_notice("No usable update command was found for the selected source.")
+            self.show_notice(message)
+            self.send_notification("Update preflight failed", blocking_issues[0].message)
             return
+        warnings = [issue.message for issue in preflight_issues if not issue.blocking]
+        if warnings:
+            self.show_notice("Preflight warning: " + " ".join(warnings))
 
+        command_pairs = [
+            (
+                source,
+                cuc.PROVIDERS[source].build_command(
+                    self.config,
+                    source != "aur",
+                ),
+            )
+            for source in targets
+            if source in cuc.PROVIDERS
+        ]
+        missing_commands = [source for source, command in command_pairs if command is None]
+        if missing_commands:
+            self.session.reset()
+            message = "No usable update command was found for: " + ", ".join(
+                cuc.SOURCE_DISPLAY_NAMES.get(source, source)
+                for source in missing_commands
+            )
+            logging.error(message)
+            self.show_notice(message)
+            return
+        polkit = cuc.check_polkit_readiness()
+        privileged_sources = [source for source in targets if source in ("pacman", "snap")]
+        if privileged_sources and not polkit.ready:
+            self.session.reset()
+            message = (
+                "Native Polkit integration is required for desktop system updates. "
+                + polkit.message
+                + " Install it or use the terminal frontend."
+            )
+            logging.error(message)
+            self.show_notice(message)
+            return
+        commands = [
+            ["pkexec", str(POLKIT_HELPER), source]
+            if source in ("pacman", "snap")
+            else command
+            for source, command in command_pairs
+            if command is not None
+        ]
+        if "aur" in targets and secure_terminal_command(["true"]) is None:
+            self.session.reset()
+            self.show_notice("A terminal emulator is required for secure AUR authentication and review.")
+            return
+        self.session.targets = list(targets)
+        self.session.commands = [list(command) for command in commands]
+        self.persist_session("installation-approved")
+        logging.info(
+            "Update installation approved targets=%s authentication=%s",
+            ",".join(targets),
+            "polkit-and-terminal" if "aur" in targets else "polkit-or-unprivileged",
+        )
         self.set_update_in_progress(True)
-        # Authenticate before commands that can request sudo credentials. A
-        # Flatpak-only update does not need a password and can start directly.
-        needs_authentication = any(cuc.update_command_needs_authentication(command) for command in commands)
-        if needs_authentication:
-            self.session.begin_authentication(commands)
-            self.request_update_password(commands)
-        else:
-            self.run_updates_in_window(commands, "")
+        try:
+            self.run_updates_in_window(commands)
+        except Exception as exc:
+            self.abort_update(f"Could not start the update session: {exc}")
+
+    def show_preflight_retry(self, targets: list[str], message: str) -> None:
+        """Let transient package-manager conflicts be checked again in place."""
+        dialog = Adw.AlertDialog(
+            heading="Another update process is still running",
+            body=message + "\n\nClose or finish that process, then retry the safety check.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("retry", "Retry safety check")
+        dialog.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("retry")
+        dialog.set_close_response("cancel")
+
+        def respond(_current: Adw.AlertDialog, response: str) -> None:
+            if response == "retry":
+                self.persist_session("preflight-retry")
+                self.launch_updates(list(targets))
+                return
+            self.session.reset()
+            self.persist_session("review-cancelled")
+
+        dialog.connect("response", respond)
+        dialog.present(self)
 
     def set_update_in_progress(self, active: bool) -> None:
         self.update_in_progress = active
         self.refresh_button.set_sensitive(not active and not self.check_in_progress)
         if active:
+            self.review_all_button.set_sensitive(False)
             self.install_all_button.set_sensitive(False)
             for card in self.cards.values():
+                card.review_button.set_sensitive(False)
                 card.install_button.set_sensitive(False)
             return
         if self.state:
@@ -934,92 +1473,53 @@ class UpdateWindow(Adw.ApplicationWindow):
                 if source in self.cards:
                     self.cards[source].update(result)
             has_updates = any(result.available for result in self.state.results.values())
-            self.install_all_button.set_sensitive(has_updates)
-            self.install_all_button.set_visible(has_updates)
+            has_installable_updates = bool(self.state.installable_sources())
+            self.review_all_button.set_sensitive(has_updates)
+            self.review_all_button.set_visible(has_updates)
+            self.install_all_button.set_sensitive(has_installable_updates)
+            self.install_all_button.set_visible(has_installable_updates)
 
     def abort_update(self, message: str) -> bool:
+        logging.error("Desktop update aborted: %s", message)
         self.session.fail(message)
+        self.persist_session("aborted")
         self.set_update_in_progress(False)
         self.show_notice(message)
+        self.send_notification("Update did not start", message)
         return False
 
-    def request_update_password(self, commands: list[list[str]]) -> None:
-        dialog = Gtk.Dialog(transient_for=self, modal=True, title="Administrator password")
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Continue", Gtk.ResponseType.ACCEPT)
-        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
-        content = dialog.get_content_area()
-        content.set_spacing(12)
-        content.set_margin_top(18)
-        content.set_margin_bottom(18)
-        content.set_margin_start(18)
-        content.set_margin_end(18)
-        content.append(Gtk.Label(label="Enter your password to start the update.", xalign=0))
-        password = Gtk.PasswordEntry(show_peek_icon=True)
-        content.append(password)
-        password.connect("activate", lambda *_: dialog.response(Gtk.ResponseType.ACCEPT))
-
-        def respond(current: Gtk.Dialog, response: int) -> None:
-            value = password.get_text() if response == Gtk.ResponseType.ACCEPT else None
-            current.close()
-            if value is not None:
-                self.authenticate_and_run_updates(commands, value)
-            else:
-                self.session.reset()
-                self.set_update_in_progress(False)
-
-        dialog.connect("response", respond)
-        dialog.present()
-        password.grab_focus()
-
-    def authenticate_and_run_updates(self, commands: list[list[str]], password: str) -> None:
-        """Validate sudo in the app, then use its timestamp for the update terminal."""
-        def worker() -> None:
-            credential = password
-            try:
-                auth = subprocess.run(
-                    ["sudo", "-S", "-p", "", "-v"], input=f"{credential}\n", text=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
-                    timeout=AUTHENTICATION_TIMEOUT,
-                )
-            except subprocess.TimeoutExpired:
-                credential = ""
-                GLib.idle_add(self.abort_update, "Administrator verification timed out. No updates were started.")
-                return
-            except OSError as exc:
-                credential = ""
-                GLib.idle_add(self.abort_update, f"Could not verify administrator access: {exc}")
-                return
-            if auth.returncode:
-                credential = ""
-                GLib.idle_add(self.abort_update, "Password was not accepted. No updates were started.")
-                return
-            GLib.idle_add(self.run_updates_in_window, commands, credential)
-            credential = ""
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def run_updates_in_window(self, commands: list[list[str]], password: str) -> bool:
+    def run_updates_in_window(self, commands: list[list[str]]) -> bool:
         """Run CUC's update commands while streaming their output into GTK."""
         self.session.begin_install()
-        dialog = Gtk.Dialog(transient_for=self, modal=True, title="Installing updates")
-        cancel_button = dialog.add_button("Cancel update", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        dialog.set_default_size(760, 480)
-        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        self.persist_session("installation-started")
+        dialog = Adw.Dialog(title="Installing updates")
+        dialog.set_content_width(760)
+        dialog.set_content_height(480)
+        dialog.set_can_close(False)
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        cancel_button = Gtk.Button(label="Cancel update")
+        close_button = Gtk.Button(label="Close")
         close_button.set_sensitive(False)
+        header.pack_start(cancel_button)
+        header.pack_end(close_button)
+        toolbar.add_top_bar(header)
         cancel_event = threading.Event()
         self.cancel_event = cancel_event
+        application = self.get_application()
+        inhibit_cookie = 0
+        if isinstance(application, Gtk.Application):
+            inhibit_cookie = application.inhibit(
+                self,
+                Gtk.ApplicationInhibitFlags.LOGOUT | Gtk.ApplicationInhibitFlags.SUSPEND,
+                "Installing system updates",
+            )
 
-        def respond(current: Gtk.Dialog, response: int) -> None:
-            if response == Gtk.ResponseType.CANCEL and not close_button.get_sensitive():
-                self.cancel_active_update()
-                cancel_button.set_sensitive(False)
-                return
-            if response == Gtk.ResponseType.CLOSE and close_button.get_sensitive():
-                current.close()
-
-        dialog.connect("response", respond)
+        cancel_button.connect(
+            "clicked",
+            lambda *_args: (self.cancel_active_update(), cancel_button.set_sensitive(False)),
+        )
+        close_button.connect("clicked", lambda *_args: dialog.close())
 
         output = Gtk.TextView()
         output.set_editable(False)
@@ -1033,8 +1533,9 @@ class UpdateWindow(Adw.ApplicationWindow):
         scroll.set_hexpand(True)
         scroll.set_vexpand(True)
         scroll.set_child(output)
-        dialog.get_content_area().append(scroll)
-        dialog.present()
+        toolbar.set_content(scroll)
+        dialog.set_child(toolbar)
+        dialog.present(self)
 
         def append(text: str) -> bool:
             buffer = output.get_buffer()
@@ -1043,85 +1544,147 @@ class UpdateWindow(Adw.ApplicationWindow):
             output.scroll_to_iter(buffer.get_end_iter(), 0.0, False, 0.0, 1.0)
             return False
 
-        def finish(message: str) -> bool:
-            append(message)
+        def finish(summary: cuc.InstallSummary) -> bool:
+            message = summary.message()
+            append(f"\n{message}\n")
             cancel_button.set_sensitive(False)
             close_button.set_sensitive(True)
+            dialog.set_can_close(True)
             with self.process_lock:
                 self.active_process = None
             self.cancel_event = None
-            self.session.finish(message.strip())
+            if inhibit_cookie and isinstance(application, Gtk.Application):
+                application.uninhibit(inhibit_cookie)
+            self.last_install_summary = summary
+            if summary.successful():
+                self.session.finish(message)
+                notification_title = "Updates completed"
+            else:
+                self.session.fail(message)
+                notification_title = "Update session needs attention"
+            self.persist_session("installation-finished")
+            logging.info("Desktop update summary: %s", message)
             self.set_update_in_progress(False)
+            self.pending_install_summary = True
+            self.send_notification(notification_title, message)
             self.refresh()
             return False
 
-        commands = [["sudo", "-A", *command[1:]] if command[0] == "sudo" else command for command in commands]
+        command_sources = list(self.session.targets)
 
         def worker() -> None:
-            try:
-                askpass_dir, askpass_path = create_sudo_askpass()
-            except OSError as exc:
-                GLib.idle_add(finish, f"Could not prepare administrator authentication: {exc}\n")
-                return
-            try:
-                for command in commands:
-                    if cancel_event.is_set():
-                        GLib.idle_add(finish, "Update cancelled before the next source started.\n")
-                        return
-                    GLib.idle_add(append, f"$ {shlex.join(command)}\n")
-                    child_env = os.environ.copy()
-                    pass_fds: tuple[int, ...] = ()
-                    read_fd: int | None = None
-                    if cuc.update_command_needs_authentication(command):
-                        read_fd, write_fd = os.pipe()
-                        os.write(write_fd, ((password + "\n") * 32).encode("utf-8"))
-                        os.close(write_fd)
-                        child_env["SUDO_ASKPASS"] = askpass_path
-                        child_env["CUC_ASKPASS_FD"] = str(read_fd)
-                        pass_fds = (read_fd,)
-                    try:
-                        process = subprocess.Popen(
-                            command,
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            bufsize=1,
-                            env=child_env,
-                            pass_fds=pass_fds,
-                            start_new_session=True,
+            summary = cuc.InstallSummary()
+
+            def run_one(source: str, command: list[str]) -> cuc.ExecutionOutcome:
+                if cancel_event.is_set():
+                    return cuc.ExecutionOutcome(source, "cancelled", "Cancelled before this source started.")
+                actual_command = command
+                if source == "aur":
+                    wrapped = secure_terminal_command(command)
+                    if wrapped is None:
+                        return cuc.ExecutionOutcome(source, "failed", "No secure terminal emulator was found.")
+                    actual_command = wrapped
+                    GLib.idle_add(
+                        append,
+                        "AUR review and authentication opened in a separate terminal. "
+                        "CUC never receives your password.\n",
+                    )
+                else:
+                    GLib.idle_add(append, f"$ {shlex.join(actual_command)}\n")
+                logging.info(
+                    "Desktop update command starting source=%s command=%s",
+                    source,
+                    shlex.join(actual_command),
+                )
+                try:
+                    process = subprocess.Popen(
+                        actual_command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    logging.error("Could not start update source=%s: %s", source, exc)
+                    return cuc.ExecutionOutcome(source, "failed", f"Could not start command: {exc}")
+                with self.process_lock:
+                    self.active_process = process
+                timed_out = threading.Event()
+
+                def force_kill() -> None:
+                    if process.poll() is None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+
+                def terminate_for_timeout() -> None:
+                    if process.poll() is None:
+                        timed_out.set()
+                        logging.error(
+                            "Desktop update timed out source=%s timeout=%ss",
+                            source,
+                            self.config.installation_timeout,
                         )
-                    except OSError as exc:
-                        if read_fd is not None:
-                            os.close(read_fd)
-                        GLib.idle_add(finish, f"Could not start command: {exc}\n")
-                        return
-                    if read_fd is not None:
-                        os.close(read_fd)
-                    with self.process_lock:
-                        self.active_process = process
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                        kill_timer = threading.Timer(5, force_kill)
+                        kill_timer.daemon = True
+                        kill_timer.start()
+
+                timeout_timer = threading.Timer(
+                    self.config.installation_timeout,
+                    terminate_for_timeout,
+                )
+                timeout_timer.daemon = True
+                timeout_timer.start()
+                try:
                     assert process.stdout is not None
                     for line in process.stdout:
                         GLib.idle_add(append, line)
-                    if process.wait() != 0:
-                        if cancel_event.is_set():
-                            GLib.idle_add(finish, "Update cancelled. Review the output before continuing.\n")
-                        else:
-                            GLib.idle_add(finish, f"Update stopped with exit status {process.returncode}.\n")
-                        return
+                    return_code = process.wait()
+                finally:
+                    timeout_timer.cancel()
                     with self.process_lock:
                         self.active_process = None
-                GLib.idle_add(finish, "Updates completed successfully.\n")
-            except Exception as exc:
-                GLib.idle_add(finish, f"Update session failed unexpectedly: {exc}\n")
-            finally:
-                askpass_dir.cleanup()
+                logging.info(
+                    "Desktop update command finished source=%s exit_code=%s",
+                    source,
+                    return_code,
+                )
+                if timed_out.is_set():
+                    return cuc.ExecutionOutcome(
+                        source,
+                        "timed-out",
+                        f"Exceeded {self.config.installation_timeout} seconds.",
+                        return_code,
+                    )
+                if cancel_event.is_set():
+                    return cuc.ExecutionOutcome(source, "cancelled", "Cancelled by the user.", return_code)
+                if return_code:
+                    return cuc.ExecutionOutcome(
+                        source,
+                        "failed",
+                        f"Exited with status {return_code}.",
+                        return_code,
+                    )
+                return cuc.ExecutionOutcome(source, "succeeded", "Completed successfully.", 0)
 
-        threading.Thread(target=worker, daemon=True).start()
+            outcomes = cuc.UPDATE_EXECUTOR.execute(zip(command_sources, commands), run_one)
+            summary.extend_execution(outcomes)
+            GLib.idle_add(finish, summary)
+
+        threading.Thread(target=worker, daemon=False, name="cuc-update-executor").start()
         return False
 
     def cancel_active_update(self) -> None:
+        logging.warning("Desktop update cancellation requested")
         self.session.request_cancel()
+        self.persist_session("cancellation-requested")
         if self.cancel_event:
             self.cancel_event.set()
         with self.process_lock:
@@ -1131,6 +1694,29 @@ class UpdateWindow(Adw.ApplicationWindow):
                 os.killpg(process.pid, signal.SIGINT)
             except OSError as exc:
                 self.show_notice(f"Could not signal the update process: {exc}")
+                return
+
+            def terminate_if_needed() -> None:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except OSError:
+                        return
+
+                    def kill_if_needed() -> None:
+                        if process.poll() is None:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+
+                    kill_timer = threading.Timer(5, kill_if_needed)
+                    kill_timer.daemon = True
+                    kill_timer.start()
+
+            terminate_timer = threading.Timer(5, terminate_if_needed)
+            terminate_timer.daemon = True
+            terminate_timer.start()
 
     def open_terminal(self) -> None:
         terminal = next((name for name in ("kgx", "gnome-terminal", "xterm") if shutil.which(name)), None)
@@ -1141,6 +1727,23 @@ class UpdateWindow(Adw.ApplicationWindow):
             subprocess.Popen([terminal], start_new_session=True)
         except OSError as exc:
             self.show_notice(f"Could not open the terminal: {exc}")
+
+    def export_diagnostic_bundle(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        destination = Path(self.config.preview_dir) / f"cuc-diagnostics-{timestamp}.zip"
+        try:
+            cuc.export_diagnostics(
+                destination,
+                self.config,
+                state=self.state,
+                app_version=cuc.__version__,
+            )
+        except OSError as exc:
+            logging.error("Could not export diagnostics: %s", exc)
+            self.show_notice(f"Could not export diagnostics: {exc}")
+            return
+        logging.info("Privacy-safe diagnostics exported to %s", destination)
+        self.show_notice(f"Diagnostics exported to {destination}")
 
 
 class CucDesktopApplication(Adw.Application):

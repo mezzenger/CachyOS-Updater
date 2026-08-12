@@ -27,7 +27,12 @@ def main() -> int:
         print("This helper must be authorized through Polkit.", file=sys.stderr)
         return 77
     command = COMMANDS[args.source]
-    return subprocess.call(command, stdin=subprocess.DEVNULL)
+    environment = {
+        "HOME": "/root",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": "/usr/bin",
+    }
+    return subprocess.call(command, stdin=subprocess.DEVNULL, env=environment)
 
 
 if __name__ == "__main__":

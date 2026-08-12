@@ -7,6 +7,11 @@ repository root:
 
 - `cuc.py`: terminal dashboard, JSON output, update checks, installs, config,
   logging, and voice support.
+- `cuc_controller.py`: frontend-independent check, retry, merge, and command
+  planning orchestration.
+- `cuc_providers.py`: shared provider contract and ordered registry.
+- `cuc_advisory.py`: authenticated and versioned AUR advisory updates.
+- `cuc_diagnostics.py`: privacy-safe diagnostic bundle creation.
 - `cuc_desktop.py`: GTK/libadwaita desktop dashboard.
 - `test_cuc.py`: unit tests for config handling and core update behavior.
 - `io.github.alvin.Cuc.desktop`: desktop launcher.
@@ -41,7 +46,13 @@ Run the automated checks before handoff:
 ```sh
 python3 -m unittest -v test_cuc.py
 python3 -m py_compile cuc.py
+python3 -m py_compile cuc_advisory.py
+python3 -m py_compile cuc_controller.py
 python3 -m py_compile cuc_desktop.py
+python3 -m py_compile cuc_diagnostics.py
+python3 -m py_compile cuc_providers.py
+python3 -m py_compile cuc_privileged.py
+python3 -m py_compile scripts/sign-advisory.py
 ```
 
 ## Coding Style & Naming Conventions
@@ -72,6 +83,7 @@ desktop UI changes. Mention any manual checks involving real update sources.
 ## Security & Configuration Tips
 
 Do not hard-code user-specific paths except documented defaults. Be careful with
-commands that install updates or request authentication; desktop update commands
-should remain non-interactive after the password dialog. Keep logs and preview
+commands that install updates or request authentication. Desktop Pacman and Snap
+operations must use the fixed-command Polkit helper, and AUR authentication must
+remain outside the desktop process. Keep logs and preview
 files in the documented XDG locations.

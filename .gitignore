@@ -1,5 +1,12 @@
 __pycache__/
+*advisory*private*.pem
+*advisory*signing*.pem
 *.py[cod]
 backups/
 .coverage
+coverage.xml
+.mypy_cache/
 .ruff_cache/
+pkg/
+src/
+*.pkg.tar.*

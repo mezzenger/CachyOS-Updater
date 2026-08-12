@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "updated_at": "2026-08-02",
+  "expires_at": "2026-09-02",
   "incident_active": true,
   "advisory_url": "https://archlinux.org/news/active-aur-malicious-packages-incident/",
   "notes": "Package names are sourced from confirmed Arch aur-general incident threads. This list is a safety backstop, not a complete malware detector.",

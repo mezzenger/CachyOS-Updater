@@ -17,8 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,12 +30,23 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from cuc_advisory import (
+    AdvisoryUpdateError,
+    advisory_is_expired,
+    install_authenticated_advisory,
+    install_signed_advisory,
+    load_authenticated_cache,
+    validate_advisory,
+)
+from cuc_controller import ExecutionOutcome, UpdateController, UpdateExecutor
+from cuc_diagnostics import export_diagnostics as export_diagnostics
+from cuc_providers import ProviderRegistry, UpdateProvider
 
 try:
     from rich import box
@@ -50,25 +64,33 @@ except ImportError:
     sys.exit(1)
 
 APP_NAME = "cachyos-update-center"
-__version__ = "0.2.0"
+__version__ = "0.5.1"
 DEFAULT_PIPER_MODEL = "/usr/share/piper-voices/en/en_GB/alba/medium/en_GB-alba-medium.onnx"
 DEFAULT_PREVIEW_DIR = Path.home() / ".cache" / "update-check-preview"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / APP_NAME / "config.json"
 DEFAULT_LOG_PATH = Path.home() / ".local" / "state" / APP_NAME / "app.log"
+DEFAULT_ADVISORY_CACHE = Path.home() / ".cache" / APP_NAME / "aur-security-advisories.json"
 DEFAULT_TIMEOUT = 120
 MAX_DETAIL_ROWS = 18
 VOICE_TIMEOUT = 45
 PLAYER_TIMEOUT = 60
 CHECK_FAILURE_EXIT = 1
 SECURITY_BLOCK_EXIT = 3
+UPDATE_SOURCES = ("pacman", "aur", "flatpak", "snap")
+SOURCE_DISPLAY_NAMES = {
+    "pacman": "Pacman",
+    "aur": "AUR",
+    "flatpak": "Flatpak",
+    "snap": "Snap",
+}
 SUPPORTED_AUR_HELPERS = ("yay", "paru", "pikaur")
 AUR_ADVISORY_PATH = Path(__file__).with_name("data") / "aur-security-advisories.json"
 AUR_RPC_URL = "https://aur.archlinux.org/rpc/v5/info"
 AUR_RPC_BATCH_SIZE = 50
-AUR_AUTH_OPTIONS = {
-    "yay": ["--sudoloop", "--sudoflags", "-A"],
-    "paru": ["--sudoloop", "--sudoflags", "-A"],
-    "pikaur": ["--sudoloop", "--sudoflags", "-A"],
+AUR_NONINTERACTIVE_OPTIONS = {
+    "yay": ["--noconfirm", "--sudoloop", "--sudoflags", "-n"],
+    "paru": ["--noconfirm", "--sudoloop", "--sudoflags", "-n"],
+    "pikaur": ["--noconfirm"],
 }
 
 console = Console()
@@ -79,6 +101,29 @@ class ConfigError(ValueError):
     """Raised when a configuration file cannot be safely used."""
 
 
+def validate_signed_advisory_settings(
+    feed_url: str,
+    signature_url: str,
+    public_key_file: str,
+) -> tuple[str, str, str]:
+    """Validate and normalize the optional signed-advisory configuration."""
+    values = tuple(value.strip() for value in (feed_url, signature_url, public_key_file))
+    if not any(values):
+        return values
+    if not all(values):
+        raise ConfigError(
+            "Signed advisory updates require the feed URL, signature URL, and public key file together."
+        )
+    for label, url in (("feed", values[0]), ("signature", values[1])):
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ConfigError(f"The signed advisory {label} URL must be a valid HTTPS URL.")
+    key_path = Path(values[2]).expanduser()
+    if not key_path.is_absolute():
+        raise ConfigError("The signed advisory public key file must use an absolute path.")
+    return values[0], values[1], str(key_path)
+
+
 @dataclass(slots=True)
 class Config:
     voice_enabled: bool = True
@@ -86,8 +131,20 @@ class Config:
     preview_dir: str = str(DEFAULT_PREVIEW_DIR)
     log_file: str = str(DEFAULT_LOG_PATH)
     command_timeout: int = DEFAULT_TIMEOUT
+    installation_timeout: int = 3600
+    max_result_age_minutes: int = 15
+    minimum_free_space_mb: int = 1024
     spoken_name: str = "Cozmik"
     aur_helper: str = "auto"
+    notifications_enabled: bool = True
+    advisory_cache_file: str = str(DEFAULT_ADVISORY_CACHE)
+    advisory_feed_url: str = ""
+    advisory_signature_url: str = ""
+    advisory_public_key_file: str = ""
+    advisory_refresh_hours: int = 24
+    enabled_sources: dict[str, bool] = field(
+        default_factory=lambda: {source: True for source in UPDATE_SOURCES}
+    )
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -106,25 +163,77 @@ class Config:
                 raise ConfigError(f"Configuration field '{name}' must be a non-empty string.")
             return value
 
+        def optional_string(name: str, default: str = "") -> str:
+            value = data.get(name, default)
+            if not isinstance(value, str):
+                raise ConfigError(f"Configuration field '{name}' must be a string.")
+            return value.strip()
+
         voice_enabled = data.get("voice_enabled", True)
         if not isinstance(voice_enabled, bool):
             raise ConfigError("Configuration field 'voice_enabled' must be true or false.")
-        command_timeout = data.get("command_timeout", DEFAULT_TIMEOUT)
-        if isinstance(command_timeout, bool) or not isinstance(command_timeout, int) or command_timeout <= 0:
-            raise ConfigError("Configuration field 'command_timeout' must be a positive integer.")
+
+        def positive_integer(name: str, default: int) -> int:
+            value = data.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ConfigError(f"Configuration field '{name}' must be a positive integer.")
+            return value
+
+        def boolean(name: str, default: bool) -> bool:
+            value = data.get(name, default)
+            if not isinstance(value, bool):
+                raise ConfigError(f"Configuration field '{name}' must be true or false.")
+            return value
+
+        enabled_sources = data.get(
+            "enabled_sources", {source: True for source in UPDATE_SOURCES}
+        )
+        if not isinstance(enabled_sources, dict):
+            raise ConfigError("Configuration field 'enabled_sources' must be an object.")
+        unknown_sources = set(enabled_sources) - set(UPDATE_SOURCES)
+        if unknown_sources:
+            raise ConfigError(
+                "Configuration field 'enabled_sources' contains unknown source(s): "
+                + ", ".join(sorted(unknown_sources))
+            )
+        normalized_sources = {
+            source: enabled_sources.get(source, True) for source in UPDATE_SOURCES
+        }
+        if any(not isinstance(value, bool) for value in normalized_sources.values()):
+            raise ConfigError("Every 'enabled_sources' value must be true or false.")
+
         aur_helper = string("aur_helper", "auto").lower()
         if aur_helper not in ("auto", *SUPPORTED_AUR_HELPERS):
             choices = ", ".join(("auto", *SUPPORTED_AUR_HELPERS))
             raise ConfigError(f"Configuration field 'aur_helper' must be one of: {choices}.")
+
+        advisory_settings = validate_signed_advisory_settings(
+            optional_string("advisory_feed_url"),
+            optional_string("advisory_signature_url"),
+            optional_string("advisory_public_key_file"),
+        )
 
         return cls(
             voice_enabled=voice_enabled,
             piper_model=string("piper_model", DEFAULT_PIPER_MODEL),
             preview_dir=string("preview_dir", str(DEFAULT_PREVIEW_DIR)),
             log_file=string("log_file", str(DEFAULT_LOG_PATH)),
-            command_timeout=command_timeout,
+            command_timeout=positive_integer("command_timeout", DEFAULT_TIMEOUT),
+            installation_timeout=positive_integer("installation_timeout", 3600),
+            max_result_age_minutes=positive_integer("max_result_age_minutes", 15),
+            minimum_free_space_mb=positive_integer("minimum_free_space_mb", 1024),
             spoken_name=string("spoken_name", "Cozmik"),
             aur_helper=aur_helper,
+            notifications_enabled=boolean("notifications_enabled", True),
+            advisory_cache_file=string(
+                "advisory_cache_file",
+                str(DEFAULT_ADVISORY_CACHE),
+            ),
+            advisory_feed_url=advisory_settings[0],
+            advisory_signature_url=advisory_settings[1],
+            advisory_public_key_file=advisory_settings[2],
+            advisory_refresh_hours=positive_integer("advisory_refresh_hours", 24),
+            enabled_sources=normalized_sources,
         )
 
     def save(self, path: Path) -> None:
@@ -132,6 +241,15 @@ class Config:
         # This leaves the original file available for manual recovery.
         if path.exists():
             type(self).load(path)
+        (
+            self.advisory_feed_url,
+            self.advisory_signature_url,
+            self.advisory_public_key_file,
+        ) = validate_signed_advisory_settings(
+            self.advisory_feed_url,
+            self.advisory_signature_url,
+            self.advisory_public_key_file,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
@@ -144,6 +262,7 @@ class UpdateResult:
     display_name: str
     command_hint: str
     available_on_system: bool = True
+    enabled: bool = True
     available: bool = False
     count: int = 0
     items: list[str] = field(default_factory=list)
@@ -151,6 +270,8 @@ class UpdateResult:
     install_allowed: bool = True
     security_status: str = "not-applicable"
     security_warnings: list[str] = field(default_factory=list)
+    security_advisory_url: str = ""
+    security_advisory_updated_at: str = ""
     checked_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict:
@@ -165,13 +286,21 @@ class AppState:
         return {name: result.count for name, result in self.results.items()}
 
     def any_updates(self) -> bool:
-        return any(result.available for result in self.results.values())
+        return any(result.enabled and result.available for result in self.results.values())
 
     def failed_results(self) -> list[UpdateResult]:
-        return [result for result in self.results.values() if result.available_on_system and result.error]
+        return [
+            result
+            for result in self.results.values()
+            if result.enabled and result.available_on_system and result.error
+        ]
 
     def unavailable_results(self) -> list[UpdateResult]:
-        return [result for result in self.results.values() if not result.available_on_system]
+        return [
+            result
+            for result in self.results.values()
+            if result.enabled and not result.available_on_system
+        ]
 
     def is_healthy(self) -> bool:
         return not self.failed_results()
@@ -180,8 +309,30 @@ class AppState:
         return [
             source
             for source, result in self.results.items()
-            if result.available and result.install_allowed and not result.error
+            if result.enabled and result.available and result.install_allowed and not result.error
         ]
+
+    def stale_sources(
+        self,
+        max_age_minutes: int,
+        sources: Iterable[str] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        current_time = now or datetime.now()
+        requested = set(sources) if sources is not None else set(self.results)
+        stale: list[str] = []
+        for source, result in self.results.items():
+            if source not in requested or not result.enabled:
+                continue
+            try:
+                checked_at = datetime.fromisoformat(result.checked_at)
+            except ValueError:
+                stale.append(source)
+                continue
+            if (current_time - checked_at).total_seconds() > max_age_minutes * 60:
+                stale.append(source)
+        return stale
 
 
 @dataclass(slots=True)
@@ -192,6 +343,7 @@ class AurSecurityReport:
     missing: list[str] = field(default_factory=list)
     incident_active: bool = False
     advisory_url: str = ""
+    advisory_updated_at: str = ""
     error: str | None = None
 
     def install_allowed(self) -> bool:
@@ -231,7 +383,6 @@ class AurSecurityReport:
 class SessionPhase(str, Enum):
     IDLE = "idle"
     REVIEWING = "reviewing"
-    AUTHENTICATING = "authenticating"
     INSTALLING = "installing"
     CANCELLING = "cancelling"
     COMPLETE = "complete"
@@ -254,14 +405,8 @@ class UpdateSession:
         self.message = ""
         return True
 
-    def begin_authentication(self, commands: list[list[str]]) -> None:
-        if self.phase != SessionPhase.REVIEWING:
-            raise RuntimeError(f"cannot authenticate from session phase {self.phase.value}")
-        self.phase = SessionPhase.AUTHENTICATING
-        self.commands = [list(command) for command in commands]
-
     def begin_install(self) -> None:
-        if self.phase not in (SessionPhase.REVIEWING, SessionPhase.AUTHENTICATING):
+        if self.phase != SessionPhase.REVIEWING:
             raise RuntimeError(f"cannot install from session phase {self.phase.value}")
         self.phase = SessionPhase.INSTALLING
 
@@ -285,24 +430,306 @@ class UpdateSession:
         self.commands = []
         self.message = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase.value,
+            "targets": list(self.targets),
+            "commands": [list(command) for command in self.commands],
+            "message": self.message,
+        }
+
+
+@dataclass(slots=True)
+class PreflightIssue:
+    code: str
+    message: str
+    blocking: bool = True
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunningPackageManager:
+    name: str
+    pid: int
+
+
+@dataclass(slots=True)
+class PolkitReadiness:
+    ready: bool
+    message: str
+
+
+@dataclass(slots=True)
+class InstallOutcome:
+    source: str
+    status: str
+    message: str
+    exit_code: int | None = None
+
+
+@dataclass(slots=True)
+class InstallSummary:
+    outcomes: list[InstallOutcome] = field(default_factory=list)
+
+    def add(
+        self,
+        source: str,
+        status: str,
+        message: str,
+        exit_code: int | None = None,
+    ) -> None:
+        self.outcomes.append(InstallOutcome(source, status, message, exit_code))
+
+    def extend_execution(self, outcomes: Iterable[ExecutionOutcome]) -> None:
+        for outcome in outcomes:
+            self.add(outcome.source, outcome.status, outcome.message, outcome.exit_code)
+
+    def by_status(self, status: str) -> list[InstallOutcome]:
+        return [outcome for outcome in self.outcomes if outcome.status == status]
+
+    def successful(self) -> bool:
+        return bool(self.outcomes) and all(
+            outcome.status == "succeeded" for outcome in self.outcomes
+        )
+
+    def message(self) -> str:
+        if not self.outcomes:
+            return "No update sources were run."
+        groups = []
+        for status in ("succeeded", "failed", "cancelled", "timed-out", "skipped"):
+            sources = [
+                SOURCE_DISPLAY_NAMES.get(outcome.source, outcome.source)
+                for outcome in self.by_status(status)
+            ]
+            if sources:
+                groups.append(f"{status.capitalize()}: {', '.join(sources)}")
+        return " · ".join(groups)
+
 
 def configure_logging(log_path: Path) -> None:
     format_string = "%(asctime)s %(levelname)s %(message)s"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        logging.basicConfig(filename=log_path, level=logging.INFO, format=format_string, force=True)
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        logging.basicConfig(
+            handlers=[handler],
+            level=logging.INFO,
+            format=format_string,
+            force=True,
+        )
     except OSError as exc:
         logging.basicConfig(stream=sys.stderr, level=logging.INFO, format=format_string, force=True)
         logging.warning("Cannot open log file %s; using stderr instead: %s", log_path, exc)
+
+    def log_uncaught_exception(exc_type, exc_value, traceback) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, traceback)
+            return
+        logging.critical(
+            "Uncaught application exception",
+            exc_info=(exc_type, exc_value, traceback),
+        )
+
+    def log_thread_exception(args: threading.ExceptHookArgs) -> None:
+        logging.critical(
+            "Uncaught worker exception in %s",
+            args.thread.name if args.thread else "unknown thread",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = log_uncaught_exception
+    threading.excepthook = log_thread_exception
 
 
 def command_exists(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def update_command_needs_authentication(command: list[str]) -> bool:
-    """Return whether an update command may need the administrator password."""
-    return bool(command) and (command[0] == "sudo" or command[0] in SUPPORTED_AUR_HELPERS)
+def check_polkit_readiness(
+    helper_path: Path = Path("/usr/lib/cachyos-update-center/cuc-privileged"),
+    policy_path: Path = Path("/usr/share/polkit-1/actions/io.github.alvin.Cuc.policy"),
+) -> PolkitReadiness:
+    if not command_exists("pkexec"):
+        return PolkitReadiness(False, "pkexec is not installed; use the terminal frontend for system updates.")
+    if not helper_path.is_file():
+        return PolkitReadiness(False, "The CUC privileged helper is not installed.")
+    if not policy_path.is_file():
+        return PolkitReadiness(False, "The CUC Polkit policy is not installed.")
+    try:
+        helper_stat = helper_path.stat()
+        policy_stat = policy_path.stat()
+    except OSError as exc:
+        return PolkitReadiness(False, f"Could not inspect the Polkit integration: {exc}")
+    if helper_path.is_symlink() or policy_path.is_symlink():
+        return PolkitReadiness(False, "The CUC Polkit files must not be symbolic links.")
+    if helper_stat.st_uid != 0 or policy_stat.st_uid != 0:
+        return PolkitReadiness(False, "The CUC Polkit files are not owned by root.")
+    unsafe_write_bits = stat.S_IWGRP | stat.S_IWOTH
+    if helper_stat.st_mode & unsafe_write_bits or policy_stat.st_mode & unsafe_write_bits:
+        return PolkitReadiness(False, "The CUC Polkit files are writable by non-root users.")
+    if not os.access(helper_path, os.X_OK):
+        return PolkitReadiness(False, "The CUC privileged helper is not executable.")
+    return PolkitReadiness(True, "Native Polkit authentication is ready for Pacman and Snap.")
+
+
+def _running_package_managers(proc_root: Path = Path("/proc")) -> list[RunningPackageManager]:
+    manager_names = {"pacman", "yay", "paru", "pikaur", "flatpak", "snap"}
+    running: list[RunningPackageManager] = []
+    try:
+        process_directories = list(proc_root.iterdir())
+    except OSError:
+        return []
+    for process_directory in process_directories:
+        if not process_directory.name.isdigit() or process_directory.name == str(os.getpid()):
+            continue
+        try:
+            command = (process_directory / "comm").read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            continue
+        if command in manager_names:
+            try:
+                status = (process_directory / "status").read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                status = ""
+            state_line = next(
+                (line for line in status.splitlines() if line.startswith("State:")),
+                "",
+            )
+            if state_line.split()[1:2] == ["Z"]:
+                continue
+            running.append(RunningPackageManager(command, int(process_directory.name)))
+    return sorted(running, key=lambda process: (process.name, process.pid))
+
+
+def check_update_preflight(
+    targets: Iterable[str],
+    state: AppState,
+    config: Config,
+    *,
+    pacman_lock: Path = Path("/var/lib/pacman/db.lck"),
+    disk_path: Path = Path("/"),
+    proc_root: Path = Path("/proc"),
+) -> list[PreflightIssue]:
+    selected = list(dict.fromkeys(targets))
+    issues: list[PreflightIssue] = []
+    for source in selected:
+        result = state.results.get(source)
+        if result is None:
+            issues.append(
+                PreflightIssue(
+                    "missing-result",
+                    f"No update result is available for {SOURCE_DISPLAY_NAMES.get(source, source)}.",
+                    source=source,
+                )
+            )
+        elif result.error:
+            detail = result.error.lower()
+            code = (
+                "network-unavailable"
+                if any(
+                    marker in detail
+                    for marker in ("network", "resolve", "fetch", "timed out", "connection")
+                )
+                else "source-check-failed"
+            )
+            issues.append(
+                PreflightIssue(
+                    code,
+                    f"{result.display_name} cannot proceed because its check failed: {result.error}",
+                    source=source,
+                )
+            )
+    stale = state.stale_sources(config.max_result_age_minutes, selected)
+    if stale:
+        issues.append(
+            PreflightIssue(
+                "stale-results",
+                "Refresh required: update results are stale for "
+                + ", ".join(SOURCE_DISPLAY_NAMES.get(source, source) for source in stale)
+                + ".",
+            )
+        )
+    if "pacman" in selected or "aur" in selected:
+        if pacman_lock.exists():
+            issues.append(
+                PreflightIssue(
+                    "pacman-lock",
+                    f"Pacman is locked by another operation: {pacman_lock}.",
+                    source="pacman",
+                )
+            )
+    conflicting_names: set[str] = set()
+    if {"pacman", "aur"} & set(selected):
+        conflicting_names.update(("pacman", "yay", "paru", "pikaur"))
+    if "flatpak" in selected:
+        conflicting_names.add("flatpak")
+    if "snap" in selected:
+        conflicting_names.add("snap")
+    running = [
+        process
+        for process in _running_package_managers(proc_root)
+        if process.name in conflicting_names
+    ]
+    if running:
+        process_details = ", ".join(
+            f"{process.name} (PID {process.pid})" for process in running
+        )
+        issues.append(
+            PreflightIssue(
+                "package-manager-running",
+                "A conflicting package manager is still running: " + process_details + ".",
+            )
+        )
+    try:
+        free_mb = shutil.disk_usage(disk_path).free // (1024 * 1024)
+        if free_mb < config.minimum_free_space_mb:
+            issues.append(
+                PreflightIssue(
+                    "disk-space",
+                    f"Only {free_mb} MiB is free; at least "
+                    f"{config.minimum_free_space_mb} MiB is required.",
+                )
+            )
+    except OSError as exc:
+        issues.append(
+            PreflightIssue(
+                "disk-check",
+                f"Free disk space could not be checked: {exc}",
+                blocking=False,
+            )
+        )
+    if "snap" in selected and command_exists("systemctl"):
+        try:
+            snap_status = subprocess.run(
+                ["systemctl", "is-active", "--quiet", "snapd.socket"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=min(config.command_timeout, 10),
+            )
+            if snap_status.returncode:
+                issues.append(
+                    PreflightIssue(
+                        "snap-service",
+                        "Snap is selected but snapd.socket is not active.",
+                        source="snap",
+                    )
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            issues.append(
+                PreflightIssue(
+                    "snap-service-check",
+                    f"Snap service readiness could not be checked: {exc}",
+                    blocking=False,
+                    source="snap",
+                )
+            )
+    return issues
 
 
 def run_capture(
@@ -329,10 +756,29 @@ def run_capture(
     return proc
 
 
-def run_interactive(cmd: list[str]) -> int:
+def run_interactive(cmd: list[str], *, timeout: int | None = None) -> int:
     logging.info("Starting interactive command: %s", " ".join(cmd))
     try:
-        return subprocess.call(cmd)
+        if timeout is None:
+            return subprocess.call(cmd)
+        process = subprocess.Popen(cmd, start_new_session=True)
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logging.error("Interactive command timed out after %s seconds: %s", timeout, " ".join(cmd))
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            return 124
     except OSError as exc:
         logging.error("Could not start interactive command %s: %s", cmd[0] if cmd else "", exc)
         console.print(f"[bold red]Could not start update command:[/bold red] {exc}")
@@ -589,9 +1035,48 @@ def load_aur_advisory(path: Path = AUR_ADVISORY_PATH) -> dict[str, Any]:
         advisory = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cannot read bundled advisory data: {exc}") from exc
-    if not isinstance(advisory, dict) or not isinstance(advisory.get("affected_packages"), list):
-        raise RuntimeError("bundled AUR advisory data has an invalid format")
-    return advisory
+    try:
+        return validate_advisory(advisory)
+    except AdvisoryUpdateError as exc:
+        raise RuntimeError(f"bundled AUR advisory data has an invalid format: {exc}") from exc
+
+
+def load_effective_aur_advisory(config: Config) -> dict[str, Any]:
+    cache_path = Path(config.advisory_cache_file)
+    cached = load_authenticated_cache(cache_path)
+    bundled = load_aur_advisory()
+    current = cached or bundled
+    signed_feed = (
+        config.advisory_feed_url,
+        config.advisory_signature_url,
+        config.advisory_public_key_file,
+    )
+    refresh_due = True
+    try:
+        refresh_due = (
+            time.time() - cache_path.stat().st_mtime
+            > config.advisory_refresh_hours * 3600
+        )
+    except OSError:
+        pass
+    if all(signed_feed) and refresh_due:
+        try:
+            current = install_signed_advisory(
+                config.advisory_feed_url,
+                config.advisory_signature_url,
+                Path(config.advisory_public_key_file),
+                cache_path,
+                timeout=min(config.command_timeout, 30),
+                current_advisory=current,
+            )
+            logging.info("Installed refreshed signed AUR advisory dated %s", current["updated_at"])
+        except AdvisoryUpdateError as exc:
+            logging.warning("Signed AUR advisory refresh failed: %s", exc)
+    if advisory_is_expired(current):
+        raise RuntimeError(
+            "AUR advisory data has expired; install a current signed advisory before updating AUR packages."
+        )
+    return current
 
 
 def fetch_aur_metadata(package_names: list[str], *, timeout: int) -> dict[str, dict[str, Any]]:
@@ -635,6 +1120,7 @@ def evaluate_aur_security(
         missing=sorted(name for name in package_names if name not in metadata) if not error else [],
         incident_active=bool(advisory.get("incident_active", False)),
         advisory_url=str(advisory.get("advisory_url", "")),
+        advisory_updated_at=str(advisory.get("updated_at", "")),
         error=error,
     )
 
@@ -642,7 +1128,7 @@ def evaluate_aur_security(
 def audit_aur_updates(items: list[str], config: Config) -> AurSecurityReport:
     package_names = list(dict.fromkeys(filter(None, (aur_package_name(item) for item in items))))
     try:
-        advisory = load_aur_advisory()
+        advisory = load_effective_aur_advisory(config)
     except RuntimeError as exc:
         return AurSecurityReport(package_names=package_names, error=str(exc))
     if not package_names:
@@ -682,6 +1168,8 @@ def check_aur_updates(config: Config) -> UpdateResult:
         result.install_allowed = report.install_allowed()
         result.security_status = report.status()
         result.security_warnings = report.warnings()
+        result.security_advisory_url = report.advisory_url
+        result.security_advisory_updated_at = report.advisory_updated_at
     except Exception as exc:
         result.error = str(exc)
     return result
@@ -689,7 +1177,7 @@ def check_aur_updates(config: Config) -> UpdateResult:
 
 def build_update_command(source: str, config: Config, *, noninteractive: bool = False) -> list[str] | None:
     if source == "pacman":
-        command = ["sudo", "pacman", "-Syu"]
+        command = ["sudo", "-n", "pacman", "-Syu"] if noninteractive else ["sudo", "pacman", "-Syu"]
         return [*command, "--noconfirm"] if noninteractive else command
     if source == "aur":
         helper = find_aur_helper(config)
@@ -697,12 +1185,12 @@ def build_update_command(source: str, config: Config, *, noninteractive: bool = 
             return None
         command = [helper, "-Sua"]
         if noninteractive:
-            command.extend(["--noconfirm", *AUR_AUTH_OPTIONS.get(helper, [])])
+            command.extend(AUR_NONINTERACTIVE_OPTIONS.get(helper, ["--noconfirm"]))
         return command
     if source == "flatpak":
         return ["flatpak", "update", "-y"] if noninteractive else ["flatpak", "update"]
     if source == "snap":
-        return ["sudo", "snap", "refresh"]
+        return ["sudo", "-n", "snap", "refresh"] if noninteractive else ["sudo", "snap", "refresh"]
     return None
 
 
@@ -714,8 +1202,12 @@ def build_update_commands(
 ) -> list[list[str]]:
     return [
         command
-        for source in targets
-        if (command := build_update_command(source, config, noninteractive=noninteractive)) is not None
+        for _source, command in UPDATE_CONTROLLER.build_plan(
+            targets,
+            config,
+            noninteractive=noninteractive,
+        )
+        if command is not None
     ]
 
 
@@ -727,8 +1219,57 @@ CHECKERS = {
 }
 
 
-def check_all_parallel(config: Config, *, show_progress: bool = True) -> AppState:
-    state = AppState()
+def _disabled_result(source: str) -> UpdateResult:
+    return UpdateResult(
+        source=source,
+        display_name=SOURCE_DISPLAY_NAMES[source],
+        command_hint="Enable this source in Settings to check it.",
+        enabled=False,
+    )
+
+
+PROVIDERS = ProviderRegistry(
+    UpdateProvider(
+        source=source,
+        display_name=SOURCE_DISPLAY_NAMES[source],
+        check=checker,
+        build_command=lambda config, noninteractive, source=source: build_update_command(
+            source,
+            config,
+            noninteractive=noninteractive,
+        ),
+        disabled_result=lambda source=source: _disabled_result(source),
+    )
+    for source, checker in CHECKERS.items()
+)
+
+
+UPDATE_CONTROLLER = UpdateController(
+    PROVIDERS,
+    lambda source, display_name, error: UpdateResult(
+        source=source,
+        display_name=display_name,
+        command_hint="",
+        error=error,
+    ),
+)
+UPDATE_EXECUTOR = UpdateExecutor()
+
+
+def check_all_parallel(
+    config: Config,
+    *,
+    show_progress: bool = True,
+    sources: Iterable[str] | None = None,
+    prior_state: AppState | None = None,
+) -> AppState:
+    requested_sources = list(sources) if sources is not None else list(PROVIDERS)
+    requested = set(requested_sources)
+    selected = [
+        source
+        for source in PROVIDERS
+        if source in requested and config.enabled_sources.get(source, True)
+    ]
     tasks: dict[str, int] = {}
 
     with Progress(
@@ -738,29 +1279,20 @@ def check_all_parallel(config: Config, *, show_progress: bool = True) -> AppStat
         transient=True,
         disable=not show_progress,
     ) as progress:
-        with ThreadPoolExecutor(max_workers=len(CHECKERS)) as executor:
-            futures = {}
-            for source, checker in CHECKERS.items():
-                tasks[source] = progress.add_task(f"Checking {source}…", total=None)
-                futures[executor.submit(checker, config)] = source
+        for source in selected:
+            tasks[source] = progress.add_task(f"Checking {source}…", total=None)
 
-            for future in as_completed(futures):
-                source = futures[future]
-                try:
-                    result = future.result()
-                except Exception as exc:  # defensive catch
-                    result = UpdateResult(
-                        source=source,
-                        display_name=source.capitalize(),
-                        command_hint="",
-                        error=str(exc),
-                    )
-                state.results[source] = result
-                progress.update(tasks[source], description=f"[green]Checked {source}")
+        def finish_task(source: str, _result: UpdateResult) -> None:
+            progress.update(tasks[source], description=f"[green]Checked {source}")
 
-    # Preserve display order.
-    state.results = {name: state.results[name] for name in CHECKERS if name in state.results}
-    return state
+        results = UPDATE_CONTROLLER.check(
+            config,
+            sources=requested_sources,
+            prior_results=prior_state.results if prior_state else None,
+            on_result=finish_task,
+        )
+
+    return AppState(results)
 
 
 def write_preview_files(state: AppState, config: Config) -> Path:
@@ -879,7 +1411,7 @@ def render_dashboard(state: AppState, config: Config) -> None:
     console.print(render_summary_table(state))
     console.print()
 
-    for source in CHECKERS:
+    for source in PROVIDERS:
         if source in state.results:
             console.print(render_detail_panel(state.results[source]))
             console.print()
@@ -899,42 +1431,118 @@ def compose_summary_speech(state: AppState, config: Config) -> str:
     return " ".join(parts)
 
 
-def install_source(source: str, state: AppState, config: Config) -> int:
+def _source_install_problem(source: str, state: AppState) -> tuple[str, str, int] | None:
     result = state.results.get(source)
     if result is None:
-        console.print(f"[red]Unknown source:[/red] {source}")
-        return 1
+        return "failed", f"Unknown source: {source}.", CHECK_FAILURE_EXIT
+    if not result.enabled:
+        return "skipped", f"{result.display_name} is disabled.", 0
     if not result.available_on_system:
-        console.print(f"[red]Cannot install {source} updates:[/red] {result.error or 'source is not installed.'}")
-        return CHECK_FAILURE_EXIT
+        return "failed", result.error or f"{result.display_name} is not installed.", CHECK_FAILURE_EXIT
     if result.error:
-        console.print(f"[red]Cannot install {source} updates because its check failed:[/red] {result.error}")
-        return CHECK_FAILURE_EXIT
+        return "failed", f"Its check failed: {result.error}", CHECK_FAILURE_EXIT
     if not result.available:
-        console.print(f"[yellow]No {source} updates to install.[/yellow]")
-        return 0
+        return "skipped", f"No {result.display_name} updates are pending.", 0
     if not result.install_allowed:
-        console.print(f"[bold red]Security check blocked {source} updates.[/bold red]")
-        for warning in result.security_warnings:
-            console.print(f"[red]•[/red] {warning}")
-        return SECURITY_BLOCK_EXIT
+        detail = " ".join(result.security_warnings) or "Security review blocked installation."
+        return "failed", detail, SECURITY_BLOCK_EXIT
+    return None
 
-    command = build_update_command(source, config)
-    if command is None:
-        console.print(f"[red]No usable update command was found for {source}.[/red]")
+def install_many(
+    sources: list[str],
+    state: AppState,
+    config: Config,
+    *,
+    noninteractive: bool = False,
+) -> int:
+    summary = InstallSummary()
+    runnable: list[str] = []
+    for source in dict.fromkeys(sources):
+        problem = _source_install_problem(source, state)
+        if problem:
+            status, message, exit_code = problem
+            summary.add(source, status, message, exit_code)
+        else:
+            runnable.append(source)
+
+    if not runnable:
+        style = "yellow" if any(outcome.status == "failed" for outcome in summary.outcomes) else "green"
+        console.print(f"[{style}]{summary.message()}[/{style}]")
+        failures = [
+            outcome.exit_code or CHECK_FAILURE_EXIT
+            for outcome in summary.outcomes
+            if outcome.status == "failed"
+        ]
+        return failures[-1] if failures else 0
+
+    if noninteractive and any(source in ("pacman", "aur", "snap") for source in runnable):
+        try:
+            authorization = subprocess.run(
+                ["sudo", "-n", "-v"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=min(config.command_timeout, 30),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            console.print(f"[red]Could not validate non-interactive sudo authorization: {exc}[/red]")
+            return CHECK_FAILURE_EXIT
+        if authorization.returncode:
+            console.print(
+                "[red]Non-interactive installation requires a current sudo credential. "
+                "Run 'sudo -v' in this terminal, then retry.[/red]"
+            )
+            return CHECK_FAILURE_EXIT
+
+    blocking_issues = [
+        issue for issue in check_update_preflight(runnable, state, config) if issue.blocking
+    ]
+    if blocking_issues:
+        for source in runnable:
+            summary.add(source, "failed", "Preflight blocked installation: " + blocking_issues[0].message)
+        console.print(f"[bold red]{summary.message()}[/bold red]")
         return CHECK_FAILURE_EXIT
-    speak_async(f"Installing {source} updates.", config)
-    console.print(Rule(f"Installing {source}", style="cyan"))
-    return run_interactive(command)
+
+    plan = [
+        (source, command)
+        for source, command in UPDATE_CONTROLLER.build_plan(
+            runnable,
+            config,
+            noninteractive=noninteractive,
+        )
+        if command is not None
+    ]
+    planned_sources = {source for source, _command in plan}
+    for source in runnable:
+        if source not in planned_sources:
+            summary.add(source, "failed", "No usable update command was found.", CHECK_FAILURE_EXIT)
+
+    def run_one(source: str, command: list[str]) -> ExecutionOutcome:
+        speak_async(f"Installing {source} updates.", config)
+        console.print(Rule(f"Installing {source}", style="cyan"))
+        return_code = run_interactive(command, timeout=config.installation_timeout)
+        if return_code == 0:
+            return ExecutionOutcome(source, "succeeded", "Completed successfully.", 0)
+        if return_code == 124:
+            return ExecutionOutcome(source, "timed-out", "Installation timed out.", return_code)
+        if return_code == 130:
+            return ExecutionOutcome(source, "cancelled", "Interrupted by the user.", return_code)
+        return ExecutionOutcome(source, "failed", f"Exited with status {return_code}.", return_code)
+
+    summary.extend_execution(UPDATE_EXECUTOR.execute(plan, run_one))
+    style = "green" if summary.successful() else "yellow"
+    console.print(f"[{style}]{summary.message()}[/{style}]")
+    failures = [
+        outcome.exit_code or CHECK_FAILURE_EXIT
+        for outcome in summary.outcomes
+        if outcome.status not in ("succeeded", "skipped")
+    ]
+    return failures[-1] if failures else 0
 
 
-def install_many(sources: list[str], state: AppState, config: Config) -> int:
-    exit_code = 0
-    for source in sources:
-        code = install_source(source, state, config)
-        if code != 0:
-            exit_code = code
-    return exit_code
+def install_source(source: str, state: AppState, config: Config) -> int:
+    return install_many([source], state, config)
 
 
 def export_json(state: AppState, destination: Path | None = None) -> str:
@@ -974,10 +1582,10 @@ def prompt_selected_sources(state: AppState) -> list[str]:
     console.print("[bold cyan]Available sources:[/bold cyan] " + ", ".join(choices))
     raw = Prompt.ask("Enter one or more sources separated by commas", default=",".join(choices))
     selected = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    invalid = [item for item in selected if item not in CHECKERS]
+    invalid = [item for item in selected if item not in PROVIDERS]
     if invalid:
         console.print(f"[yellow]Ignoring unknown source(s):[/yellow] {', '.join(invalid)}")
-    return list(dict.fromkeys(item for item in selected if item in CHECKERS))
+    return list(dict.fromkeys(item for item in selected if item in PROVIDERS))
 
 
 def interactive_loop(state: AppState, config: Config, config_path: Path, *, write_cache: bool) -> int:
@@ -987,7 +1595,7 @@ def interactive_loop(state: AppState, config: Config, config_path: Path, *, writ
         choice = Prompt.ask("Choose an action", choices=[str(i) for i in range(10)] + ["e"], default="0")
 
         if choice == "1":
-            install_many(list(CHECKERS), state, config)
+            install_many(list(PROVIDERS), state, config)
             state = check_all_parallel(config)
             if write_cache:
                 write_preview_files_safely(state, config)
@@ -1056,7 +1664,7 @@ def interactive_loop(state: AppState, config: Config, config_path: Path, *, writ
 def parse_install_targets(raw: str) -> list[str]:
     value = raw.strip().lower()
     if value == "all":
-        return list(CHECKERS)
+        return list(PROVIDERS)
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
@@ -1069,14 +1677,27 @@ def parse_args() -> argparse.Namespace:
     action_group.add_argument("--json", action="store_true", help="Print JSON summary and exit")
     action_group.add_argument("--voice-test", action="store_true", help="Run voice test and exit")
     action_group.add_argument(
+        "--update-advisory",
+        metavar="HTTPS_URL",
+        help="Download and install a versioned AUR advisory after SHA-256 authentication",
+    )
+    action_group.add_argument(
         "--install",
         type=str,
-        help="Install updates non-interactively: all or comma-separated sources (pacman,aur,flatpak,snap)",
+        help=(
+            "Install updates with non-interactive package confirmation: all or comma-separated "
+            "sources (pacman,aur,flatpak,snap); sudo must already be authorized"
+        ),
     )
     parser.add_argument("--export-json", type=Path, help="Write JSON summary to a file")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice for this run")
     parser.add_argument("--timeout", type=int, help="Override command timeout in seconds (must be positive)")
     parser.add_argument("--no-cache", action="store_true", help="Do not write preview cache files or play voice")
+    parser.add_argument(
+        "--advisory-sha256",
+        metavar="DIGEST",
+        help="Trusted SHA-256 digest for --update-advisory",
+    )
     return parser.parse_args()
 
 
@@ -1101,6 +1722,31 @@ def main() -> int:
     configure_logging(Path(config.log_file))
     logging.info("Application started")
 
+    if args.update_advisory:
+        if not args.advisory_sha256:
+            console.print("[red]--update-advisory requires --advisory-sha256.[/red]")
+            return 2
+        try:
+            advisory = install_authenticated_advisory(
+                args.update_advisory,
+                args.advisory_sha256,
+                Path(config.advisory_cache_file),
+                timeout=config.command_timeout,
+                current_advisory=load_effective_aur_advisory(config),
+            )
+        except AdvisoryUpdateError as exc:
+            logging.error("Advisory update rejected: %s", exc)
+            console.print(f"[red]Advisory update rejected:[/red] {exc}")
+            return 2
+        console.print(
+            "[green]Authenticated AUR advisory installed:[/green] "
+            f"version {advisory['schema_version']}, updated {advisory['updated_at']}"
+        )
+        return 0
+    if args.advisory_sha256:
+        console.print("[red]--advisory-sha256 requires --update-advisory.[/red]")
+        return 2
+
     if args.voice_test:
         console.print(f"VOICE_ENABLED={config.voice_enabled}")
         console.print(f"PIPER_MODEL={config.piper_model}")
@@ -1121,11 +1767,11 @@ def main() -> int:
 
     if args.install:
         targets = parse_install_targets(args.install)
-        invalid = [item for item in targets if item not in CHECKERS]
+        invalid = [item for item in targets if item not in PROVIDERS]
         if invalid:
             console.print(f"[red]Invalid install target(s):[/red] {', '.join(invalid)}")
             return 2
-        rc = install_many(targets, state, config)
+        rc = install_many(targets, state, config, noninteractive=True)
         refreshed = check_all_parallel(config)
         if not args.no_cache:
             write_preview_files_safely(refreshed, config)

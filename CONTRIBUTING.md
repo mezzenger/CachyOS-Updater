@@ -5,7 +5,11 @@ match the existing style.
 
 ## Project Files
 
-- `cuc.py`: terminal interface, update checks, installs, config, logging, voice.
+- `cuc.py`: shared models, provider implementations, and terminal interface.
+- `cuc_controller.py`: frontend-independent orchestration and command planning.
+- `cuc_providers.py`: common provider contract and ordered registry.
+- `cuc_advisory.py`: authenticated advisory download and cache validation.
+- `cuc_diagnostics.py`: privacy-safe diagnostic bundle export.
 - `cuc_desktop.py`: GTK/libadwaita desktop app.
 - `cuc_privileged.py`: fixed-command Polkit helper for system-managed sources.
 - `test_cuc.py`: unit tests for config and core update behavior.
@@ -19,23 +23,31 @@ Run these before handing off changes:
 
 ```sh
 python3 -m unittest -v test_cuc.py
-python3 -m py_compile cuc.py
-python3 -m py_compile cuc_desktop.py
-python3 -m py_compile cuc_privileged.py
+python3 -m py_compile cuc.py cuc_advisory.py cuc_controller.py cuc_desktop.py
+python3 -m py_compile cuc_diagnostics.py cuc_providers.py cuc_privileged.py
+xmllint --noout packaging/io.github.alvin.Cuc.policy
+bash -n PKGBUILD scripts/*.sh
 ```
 
-CI also runs Ruff's high-signal syntax and undefined-name checks.
+CI also runs Ruff, MyPy on the GTK-independent modules, coverage reporting,
+ShellCheck, XML validation, and PKGBUILD syntax validation.
 
 ## Style Notes
 
 - Prefer standard-library code unless a dependency is already used.
-- Keep update-source behavior isolated behind the existing checker functions.
+- Keep update-source behavior behind the provider contract and registry.
 - Treat Pacman, AUR, Flatpak, and Snap as independent optional sources.
 - Do not overwrite invalid config files.
-- Keep desktop update commands non-interactive after the password dialog.
+- Never collect administrator passwords in the desktop process or pass
+  credential-bearing file descriptors to update helpers.
+- Keep Pacman and Snap behind the fixed-command Polkit helper. Run AUR helpers
+  as the desktop user in a real terminal so package review remains interactive.
 - Treat the AUR advisory list as a backstop, never as proof that another
   package is safe.
 - Add an authoritative source URL for each advisory entry.
+- Keep the Ed25519 advisory private key offline and outside the repository. Use
+  `scripts/sign-advisory.py` to produce the detached base64 signature; publish
+  only the public key, advisory JSON, and `.sig` file.
 
 ## Manual Test Checklist
 

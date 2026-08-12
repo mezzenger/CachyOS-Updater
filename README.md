@@ -18,8 +18,21 @@ The project has two front ends:
   AUR maintainer metadata before enabling installation.
 - Writes preview files and JSON summaries for scripts.
 - Optional Piper voice announcements.
-- GTK app provides a check, review, and install workflow with cancellable,
-  streamed update output.
+- GTK app can install all eligible updates directly or show the full package
+  list for optional review, with cancellable, streamed update output.
+- Supports per-source preferences, source selection during review, stale-result
+  protection, and preflight checks for locks, disk space, conflicting package
+  managers, connectivity failures, and Snap readiness.
+- Preserves successful check results when retrying failed providers and reports
+  per-source installation outcomes.
+- Uses native desktop notifications and structured desktop update logging.
+- Uses Polkit for desktop system updates and delegates AUR authentication and
+  PKGBUILD review to a real terminal; the desktop never handles passwords.
+- Routes both frontends through a shared controller and provider registry.
+- Supports authenticated, rollback-protected AUR advisory updates.
+- Supports automatic Ed25519-signed advisory refresh with expiry enforcement.
+- Rotates logs and exports privacy-safe diagnostic ZIP bundles.
+- Provides documented keyboard shortcuts and accessible names for icon controls.
 
 ## Quick Start
 
@@ -61,10 +74,13 @@ Show the installed version:
 
 ## Documentation
 
+- [CHANGELOG.md](CHANGELOG.md): release history and user-visible changes.
+- [CONTRIBUTORS.md](CONTRIBUTORS.md): project and engineering credits.
 - [INSTALL.md](INSTALL.md): dependencies, desktop launcher setup, and install notes.
 - [HOWTO.md](HOWTO.md): common user workflows.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md): authentication, missing tools, voice, and update failures.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development commands and project conventions.
+- [ACCESSIBILITY.md](ACCESSIBILITY.md): keyboard shortcuts and accessibility review.
 
 ## Configuration
 
@@ -86,13 +102,69 @@ Common settings:
   "preview_dir": "/home/alvin/.cache/update-check-preview",
   "log_file": "/home/alvin/.local/state/cachyos-update-center/app.log",
   "command_timeout": 120,
+  "installation_timeout": 3600,
+  "max_result_age_minutes": 15,
+  "minimum_free_space_mb": 1024,
   "spoken_name": "Cozmik",
-  "aur_helper": "auto"
+  "aur_helper": "auto",
+  "notifications_enabled": true,
+  "advisory_cache_file": "/home/alvin/.cache/cachyos-update-center/aur-security-advisories.json",
+  "advisory_feed_url": "",
+  "advisory_signature_url": "",
+  "advisory_public_key_file": "",
+  "advisory_refresh_hours": 24,
+  "enabled_sources": {
+    "pacman": true,
+    "aur": true,
+    "flatpak": true,
+    "snap": true
+  }
 }
 ```
 
 Set `aur_helper` to `auto`, `yay`, `paru`, or `pikaur`. With `auto`, the first
 available supported helper is selected.
+
+The desktop settings window exposes these values and reports whether the
+optional native Polkit integration is ready. Disabled sources remain visible
+on the dashboard but are not contacted.
+
+When all three signed-advisory settings are configured, CUC refreshes the feed
+at the configured interval, verifies its detached base64 Ed25519 signature,
+rejects rollbacks, and blocks AUR installation after advisory expiry.
+Settings requires the two feed locations to use HTTPS and the public key to use
+an absolute file path. Leave all three fields blank unless they were supplied
+by a trusted advisory publisher.
+
+## Architecture
+
+- `cuc.py`: shared models, terminal frontend, provider implementations, and
+  compatibility facade.
+- `cuc_providers.py`: common provider contract and ordered registry.
+- `cuc_controller.py`: frontend-independent parallel checks, retries, merging,
+  and command planning.
+- `cuc_advisory.py`: authenticated advisory validation and atomic cache updates.
+- `cuc_diagnostics.py`: redacted diagnostic bundle creation.
+
+## Authenticated Advisory Updates
+
+Download a candidate advisory only when its SHA-256 digest was obtained through
+a separate trusted channel:
+
+```sh
+./cuc.py \
+  --update-advisory https://trusted.example/aur-security-advisories.json \
+  --advisory-sha256 TRUSTED_64_CHARACTER_SHA256
+```
+
+CUC requires HTTPS, authenticates the exact bytes against the supplied digest,
+validates the schema and source URLs, rejects version/date rollbacks, and
+installs the cache atomically. An invalid cache is ignored in favor of the
+bundled advisory.
+
+Production feeds should use the automatic Ed25519 settings described above.
+The digest command remains available for one-time recovery and manually
+authenticated imports.
 
 ## AUR Safety
 
@@ -113,6 +185,11 @@ backstop and cannot detect every malicious package.
 ```sh
 python3 -m unittest -v test_cuc.py
 python3 -m py_compile cuc.py
+python3 -m py_compile cuc_advisory.py
+python3 -m py_compile cuc_controller.py
 python3 -m py_compile cuc_desktop.py
+python3 -m py_compile cuc_diagnostics.py
+python3 -m py_compile cuc_providers.py
 python3 -m py_compile cuc_privileged.py
+python3 -m py_compile scripts/sign-advisory.py
 ```
