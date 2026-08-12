@@ -5,8 +5,8 @@
 This is a small Python project with no build system. Source files live at the
 repository root:
 
-- `cuc.py`: terminal dashboard, JSON output, update checks, installs, config,
-  logging, and voice support.
+- `cuc_backend.py`: shared update checks, models, configuration, security,
+  logging, diagnostics integration, and voice support.
 - `cuc_controller.py`: frontend-independent check, retry, merge, and command
   planning orchestration.
 - `cuc_providers.py`: shared provider contract and ordered registry.
@@ -23,18 +23,6 @@ archives under `backups/`.
 
 ## Build, Test, and Development Commands
 
-Run the terminal checker:
-
-```sh
-./cuc.py --refresh-only
-```
-
-Run the interactive terminal dashboard:
-
-```sh
-./cuc.py
-```
-
 Run the desktop app:
 
 ```sh
@@ -45,7 +33,7 @@ Run the automated checks before handoff:
 
 ```sh
 python3 -m unittest -v test_cuc.py
-python3 -m py_compile cuc.py
+python3 -m py_compile cuc_backend.py
 python3 -m py_compile cuc_advisory.py
 python3 -m py_compile cuc_controller.py
 python3 -m py_compile cuc_desktop.py

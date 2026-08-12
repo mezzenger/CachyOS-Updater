@@ -23,7 +23,7 @@ class UpdateProvider:
 
 
 class ProviderRegistry:
-    """Ordered provider lookup shared by terminal and desktop controllers."""
+    """Ordered provider lookup for frontend-independent update sources."""
 
     def __init__(self, providers: Iterable[UpdateProvider]) -> None:
         self._providers = {provider.source: provider for provider in providers}

@@ -1,12 +1,7 @@
 # CachyOS Update Center
 
-CachyOS Update Center is a small Python updater for checking and installing
-updates from Pacman, the AUR, Flatpak, and Snap.
-
-The project has two front ends:
-
-- `cuc.py`: terminal dashboard, JSON output, and scripted installs.
-- `cuc_desktop.py`: native GTK/libadwaita dashboard for GNOME-style desktops.
+CachyOS Update Center is a native GTK/libadwaita application for checking and
+installing updates from Pacman, the AUR, Flatpak, and Snap.
 
 ## Features
 
@@ -16,7 +11,6 @@ The project has two front ends:
 - Supports `yay`, `paru`, and `pikaur` for AUR checks.
 - Audits pending AUR packages against a source-attributed incident list and live
   AUR maintainer metadata before enabling installation.
-- Writes preview files and JSON summaries for scripts.
 - Optional Piper voice announcements.
 - GTK app can install all eligible updates directly or show the full package
   list for optional review, with cancellable, streamed update output.
@@ -28,7 +22,7 @@ The project has two front ends:
 - Uses native desktop notifications and structured desktop update logging.
 - Uses Polkit for desktop system updates and delegates AUR authentication and
   PKGBUILD review to a real terminal; the desktop never handles passwords.
-- Routes both frontends through a shared controller and provider registry.
+- Routes update sources through a shared controller and provider registry.
 - Supports authenticated, rollback-protected AUR advisory updates.
 - Supports automatic Ed25519-signed advisory refresh with expiry enforcement.
 - Rotates logs and exports privacy-safe diagnostic ZIP bundles.
@@ -36,41 +30,15 @@ The project has two front ends:
 
 ## Quick Start
 
-Run a one-time terminal check:
-
-```sh
-./cuc.py --refresh-only
-```
-
-Run the interactive terminal dashboard:
-
-```sh
-./cuc.py
-```
-
 Run the desktop dashboard:
 
 ```sh
 ./cuc_desktop.py
 ```
 
-Install every available source from the terminal:
-
-```sh
-./cuc.py --install all
-```
-
-Print machine-readable JSON:
-
-```sh
-./cuc.py --json
-```
-
-Show the installed version:
-
-```sh
-./cuc.py --version
-```
+Use `Update all`, `Review updates`, and the per-source actions to install
+updates. AUR authentication and PKGBUILD review still open in a real terminal
+so the desktop process never handles passwords.
 
 ## Documentation
 
@@ -141,8 +109,8 @@ XDG state directory. Damaged or out-of-range window state is ignored safely.
 
 ## Architecture
 
-- `cuc.py`: shared models, terminal frontend, provider implementations, and
-  compatibility facade.
+- `cuc_backend.py`: shared models, configuration, provider implementations,
+  security checks, logging, and voice support.
 - `cuc_providers.py`: common provider contract and ordered registry.
 - `cuc_controller.py`: frontend-independent parallel checks, retries, merging,
   and command planning.
@@ -151,23 +119,10 @@ XDG state directory. Damaged or out-of-range window state is ignored safely.
 
 ## Authenticated Advisory Updates
 
-Download a candidate advisory only when its SHA-256 digest was obtained through
-a separate trusted channel:
-
-```sh
-./cuc.py \
-  --update-advisory https://trusted.example/aur-security-advisories.json \
-  --advisory-sha256 TRUSTED_64_CHARACTER_SHA256
-```
-
-CUC requires HTTPS, authenticates the exact bytes against the supplied digest,
-validates the schema and source URLs, rejects version/date rollbacks, and
-installs the cache atomically. An invalid cache is ignored in favor of the
-bundled advisory.
-
-Production feeds should use the automatic Ed25519 settings described above.
-The digest command remains available for one-time recovery and manually
-authenticated imports.
+Configure automatic Ed25519 advisory updates in the desktop settings. CUC
+requires HTTPS, validates the schema and source URLs, verifies exact feed bytes,
+rejects version/date rollbacks, and installs the cache atomically. An invalid
+cache is ignored in favor of still-valid cached or bundled advisory data.
 
 ## AUR Safety
 
@@ -187,7 +142,7 @@ backstop and cannot detect every malicious package.
 
 ```sh
 python3 -m unittest -v test_cuc.py
-python3 -m py_compile cuc.py
+python3 -m py_compile cuc_backend.py
 python3 -m py_compile cuc_advisory.py
 python3 -m py_compile cuc_controller.py
 python3 -m py_compile cuc_desktop.py

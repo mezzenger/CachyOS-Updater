@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Remove the terminal dashboard, JSON/scripted CLI, and `/usr/bin/cuc`
+  packaging entry point; CachyOS Update Center is now desktop-only.
+- Rename the shared non-executable module from `cuc.py` to `cuc_backend.py` and
+  remove the Rich runtime dependency.
+- Keep the dedicated terminal handoff for secure AUR authentication and
+  PKGBUILD review.
+
 ## 0.5.2 — 2026-08-12
 
 - Remember the desktop window's last normal size and maximized state.

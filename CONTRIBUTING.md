@@ -5,7 +5,8 @@ match the existing style.
 
 ## Project Files
 
-- `cuc.py`: shared models, provider implementations, and terminal interface.
+- `cuc_backend.py`: shared models, configuration, provider implementations,
+  security checks, logging, and voice support.
 - `cuc_controller.py`: frontend-independent orchestration and command planning.
 - `cuc_providers.py`: common provider contract and ordered registry.
 - `cuc_advisory.py`: authenticated advisory download and cache validation.
@@ -23,7 +24,7 @@ Run these before handing off changes:
 
 ```sh
 python3 -m unittest -v test_cuc.py
-python3 -m py_compile cuc.py cuc_advisory.py cuc_controller.py cuc_desktop.py
+python3 -m py_compile cuc_backend.py cuc_advisory.py cuc_controller.py cuc_desktop.py
 python3 -m py_compile cuc_diagnostics.py cuc_providers.py cuc_privileged.py
 xmllint --noout packaging/io.github.alvin.Cuc.policy
 bash -n PKGBUILD scripts/*.sh
@@ -50,18 +51,6 @@ ShellCheck, XML validation, and PKGBUILD syntax validation.
   only the public key, advisory JSON, and `.sig` file.
 
 ## Manual Test Checklist
-
-Run the terminal dashboard:
-
-```sh
-./cuc.py --refresh-only
-```
-
-Run JSON output:
-
-```sh
-./cuc.py --json
-```
 
 Run the desktop app:
 

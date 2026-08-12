@@ -16,24 +16,24 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install test tools
-        run: python -m pip install rich cryptography ruff mypy coverage
+        run: python -m pip install cryptography ruff mypy coverage
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y libxml2-utils shellcheck
       - name: Unit tests and coverage
         run: |
-          coverage run --source=cuc,cuc_advisory,cuc_controller,cuc_diagnostics,cuc_providers,cuc_privileged \
+          coverage run --source=cuc_backend,cuc_advisory,cuc_controller,cuc_diagnostics,cuc_providers,cuc_privileged \
             -m unittest -v test_cuc.py
           coverage report --show-missing --fail-under=50
           coverage xml
-      - name: Compile terminal application
+      - name: Compile application
         run: >-
           python -m py_compile
-          cuc.py cuc_advisory.py cuc_controller.py cuc_desktop.py
+          cuc_backend.py cuc_advisory.py cuc_controller.py cuc_desktop.py
           cuc_diagnostics.py cuc_providers.py cuc_privileged.py scripts/sign-advisory.py
       - name: Static analysis
         run: >-
           ruff check
-          cuc.py cuc_advisory.py cuc_controller.py cuc_desktop.py
+          cuc_backend.py cuc_advisory.py cuc_controller.py cuc_desktop.py
           cuc_diagnostics.py cuc_providers.py cuc_privileged.py scripts/sign-advisory.py test_cuc.py
       - name: Type checking
         run: >-
