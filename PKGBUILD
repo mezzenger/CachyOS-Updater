@@ -3,9 +3,9 @@ pkgver=0.5.2
 pkgrel=1
 pkgdesc="Multi-source update dashboard for Pacman, AUR, Flatpak, and Snap"
 arch=('any')
-url="https://github.com/alvin/CachyOS-Updater"
+url="https://github.com/mezzenger/CachyOS-Updater"
 license=('custom:all-rights-reserved')
-depends=('python' 'python-rich' 'python-cryptography' 'pacman-contrib' 'python-gobject' 'gtk4' 'libadwaita' 'polkit')
+depends=('python' 'python-cryptography' 'pacman-contrib' 'python-gobject' 'gtk4' 'libadwaita' 'polkit')
 optdepends=(
   'flatpak: Flatpak update support'
   'snapd: Snap update support'
@@ -22,15 +22,14 @@ package() {
   cd "$pkgname"
 
   install -d "$pkgdir/usr/lib/cachyos-update-center"
-  install -m755 cuc.py cuc_desktop.py cuc_privileged.py \
+  install -m755 cuc_desktop.py cuc_privileged.py \
     "$pkgdir/usr/lib/cachyos-update-center/"
-  install -m644 cuc_advisory.py cuc_controller.py cuc_diagnostics.py \
+  install -m644 cuc_backend.py cuc_advisory.py cuc_controller.py cuc_diagnostics.py \
     cuc_providers.py "$pkgdir/usr/lib/cachyos-update-center/"
   install -Dm644 data/aur-security-advisories.json \
     "$pkgdir/usr/lib/cachyos-update-center/data/aur-security-advisories.json"
 
   install -d "$pkgdir/usr/bin"
-  ln -s /usr/lib/cachyos-update-center/cuc.py "$pkgdir/usr/bin/cuc"
   ln -s /usr/lib/cachyos-update-center/cuc_desktop.py "$pkgdir/usr/bin/cuc-desktop"
 
   install -Dm644 io.github.alvin.Cuc.desktop \

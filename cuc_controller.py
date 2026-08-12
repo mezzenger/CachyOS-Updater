@@ -28,10 +28,10 @@ CommandRunner = Callable[[str, list[str]], ExecutionOutcome]
 
 
 class UpdateExecutor:
-    """Apply one continuation policy to terminal and desktop installs."""
+    """Apply dependency-aware continuation policy to desktop installs."""
 
     dependencies = {"aur": {"pacman"}}
-    terminal_statuses = {"cancelled", "timed-out"}
+    stop_statuses = {"cancelled", "timed-out"}
 
     def execute(
         self,
@@ -64,7 +64,7 @@ class UpdateExecutor:
 
             if outcome.status != "succeeded":
                 failed_sources.add(source)
-            if outcome.status in self.terminal_statuses:
+            if outcome.status in self.stop_statuses:
                 reason = "cancellation" if outcome.status == "cancelled" else "timeout"
                 outcomes.extend(
                     ExecutionOutcome(remaining_source, "skipped", f"Skipped after {reason}.")
@@ -76,7 +76,7 @@ class UpdateExecutor:
 
 
 class UpdateController:
-    """Run provider checks and build update plans without terminal or GTK code."""
+    """Run provider checks and build update plans without GTK code."""
 
     def __init__(
         self,

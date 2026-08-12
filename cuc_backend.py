@@ -1,25 +1,15 @@
-#!/usr/bin/env python3
-"""
-CachyOS Multi-Source Update Center
+"""CachyOS Update Center shared application backend.
 
-A Python rewrite of the user's Fish update checker with these upgrades:
-- Parallel update checks (pacman, AUR, flatpak, snap)
-- Rich terminal interface
-- Persistent JSON config
-- Structured logging
-- Background voice notifications
-- JSON export / scripting support
-- Safer subprocess handling with timeouts
+This module contains configuration, provider, security, update-planning,
+logging, diagnostics, and voice support for the GTK desktop application.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-import signal
 import shutil
 import stat
 import subprocess
@@ -39,7 +29,6 @@ from typing import Any, Iterable, Mapping
 from cuc_advisory import (
     AdvisoryUpdateError,
     advisory_is_expired,
-    install_authenticated_advisory,
     install_signed_advisory,
     load_authenticated_cache,
     validate_advisory,
@@ -47,21 +36,6 @@ from cuc_advisory import (
 from cuc_controller import ExecutionOutcome, UpdateController, UpdateExecutor
 from cuc_diagnostics import export_diagnostics as export_diagnostics
 from cuc_providers import ProviderRegistry, UpdateProvider
-
-try:
-    from rich import box
-    from rich.align import Align
-    from rich.console import Console, Group
-    from rich.panel import Panel
-    from rich.progress import Progress, SpinnerColumn, TextColumn
-    from rich.prompt import Prompt
-    from rich.rule import Rule
-    from rich.table import Table
-    from rich.text import Text
-except ImportError:
-    print("This script needs the 'rich' package.")
-    print("Install it with: sudo pacman -S python-rich")
-    sys.exit(1)
 
 APP_NAME = "cachyos-update-center"
 __version__ = "0.5.2"
@@ -74,11 +48,8 @@ DEFAULT_WINDOW_STATE_PATH = Path(
 ) / APP_NAME / "window-state.json"
 DEFAULT_ADVISORY_CACHE = Path.home() / ".cache" / APP_NAME / "aur-security-advisories.json"
 DEFAULT_TIMEOUT = 120
-MAX_DETAIL_ROWS = 18
 VOICE_TIMEOUT = 45
 PLAYER_TIMEOUT = 60
-CHECK_FAILURE_EXIT = 1
-SECURITY_BLOCK_EXIT = 3
 UPDATE_SOURCES = ("pacman", "aur", "flatpak", "snap")
 SOURCE_DISPLAY_NAMES = {
     "pacman": "Pacman",
@@ -96,7 +67,6 @@ AUR_NONINTERACTIVE_OPTIONS = {
     "pikaur": ["--noconfirm"],
 }
 
-console = Console()
 voice_thread_lock = threading.Lock()
 
 
@@ -606,7 +576,7 @@ def check_polkit_readiness(
     policy_path: Path = Path("/usr/share/polkit-1/actions/io.github.alvin.Cuc.policy"),
 ) -> PolkitReadiness:
     if not command_exists("pkexec"):
-        return PolkitReadiness(False, "pkexec is not installed; use the terminal frontend for system updates.")
+        return PolkitReadiness(False, "pkexec is not installed; update system packages manually.")
     if not helper_path.is_file():
         return PolkitReadiness(False, "The CUC privileged helper is not installed.")
     if not policy_path.is_file():
@@ -805,38 +775,6 @@ def run_capture(
         detail = stderr or stdout or f"Command failed with exit code {proc.returncode}."
         raise RuntimeError(detail)
     return proc
-
-
-def run_interactive(cmd: list[str], *, timeout: int | None = None) -> int:
-    logging.info("Starting interactive command: %s", " ".join(cmd))
-    try:
-        if timeout is None:
-            return subprocess.call(cmd)
-        process = subprocess.Popen(cmd, start_new_session=True)
-        try:
-            return process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logging.error("Interactive command timed out after %s seconds: %s", timeout, " ".join(cmd))
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-            return 124
-    except OSError as exc:
-        logging.error("Could not start interactive command %s: %s", cmd[0] if cmd else "", exc)
-        console.print(f"[bold red]Could not start update command:[/bold red] {exc}")
-        return 127
-    except KeyboardInterrupt:
-        console.print("\n[bold yellow]Interrupted by user.[/bold yellow]")
-        return 130
 
 
 def acquire_lock(lockfile: Path, *, stale_after_seconds: int = 120) -> bool:
@@ -1310,162 +1248,19 @@ UPDATE_EXECUTOR = UpdateExecutor()
 def check_all_parallel(
     config: Config,
     *,
-    show_progress: bool = True,
+    show_progress: bool = False,
     sources: Iterable[str] | None = None,
     prior_state: AppState | None = None,
 ) -> AppState:
+    """Compatibility wrapper for non-GTK callers of the shared controller."""
+    del show_progress
     requested_sources = list(sources) if sources is not None else list(PROVIDERS)
-    requested = set(requested_sources)
-    selected = [
-        source
-        for source in PROVIDERS
-        if source in requested and config.enabled_sources.get(source, True)
-    ]
-    tasks: dict[str, int] = {}
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-        disable=not show_progress,
-    ) as progress:
-        for source in selected:
-            tasks[source] = progress.add_task(f"Checking {source}…", total=None)
-
-        def finish_task(source: str, _result: UpdateResult) -> None:
-            progress.update(tasks[source], description=f"[green]Checked {source}")
-
-        results = UPDATE_CONTROLLER.check(
-            config,
-            sources=requested_sources,
-            prior_results=prior_state.results if prior_state else None,
-            on_result=finish_task,
-        )
-
+    results = UPDATE_CONTROLLER.check(
+        config,
+        sources=requested_sources,
+        prior_results=prior_state.results if prior_state else None,
+    )
     return AppState(results)
-
-
-def write_preview_files(state: AppState, config: Config) -> Path:
-    preview_dir = Path(config.preview_dir)
-    preview_dir.mkdir(parents=True, exist_ok=True)
-
-    all_lines: list[str] = []
-    all_lines.append("CachyOS Update Preview")
-    all_lines.append("======================")
-    all_lines.append("")
-
-    for source, result in state.results.items():
-        txt_path = preview_dir / f"{source}.txt"
-        header = f"{result.display_name.upper()} ({result.count})"
-        block: list[str] = [header, "-" * len(header)]
-        if result.error:
-            block.append(f"Error: {result.error}")
-        elif result.available:
-            block.extend(result.items)
-        else:
-            block.append(f"No {source} updates available.")
-        txt_path.write_text("\n".join(block) + "\n", encoding="utf-8")
-        all_lines.extend(block)
-        all_lines.append("")
-
-    (preview_dir / "all.txt").write_text("\n".join(all_lines), encoding="utf-8")
-    (preview_dir / "summary.json").write_text(
-        json.dumps({k: v.to_dict() for k, v in state.results.items()}, indent=2),
-        encoding="utf-8",
-    )
-    return preview_dir
-
-
-def write_preview_files_safely(state: AppState, config: Config) -> Path | None:
-    try:
-        return write_preview_files(state, config)
-    except OSError as exc:
-        logging.warning("Cannot write preview files: %s", exc)
-        console.print(f"[yellow]Preview cache was not written:[/yellow] {exc}")
-        return None
-
-
-def make_header(config: Config, state: AppState) -> Panel:
-    total_updates = sum(r.count for r in state.results.values())
-    failed = state.failed_results()
-    unavailable = state.unavailable_results()
-    if failed:
-        subtitle = f"Update check incomplete: {', '.join(result.display_name for result in failed)} failed"
-        border_style = "red"
-    elif unavailable:
-        subtitle = f"{total_updates} pending update(s); unavailable: {', '.join(result.display_name for result in unavailable)}"
-        border_style = "yellow"
-    elif total_updates == 0:
-        subtitle = "System status: fully armed and annoyingly current"
-        border_style = "green"
-    else:
-        subtitle = f"{total_updates} pending update(s) across all sources"
-        border_style = "yellow"
-
-    title = Text("CachyOS Multi-Source Update Center", style="bold cyan")
-    body = Group(
-        Align.center(title),
-        Align.center(Text(subtitle, style="bold white")),
-        Align.center(Text(f"Voice: {'ON' if config.voice_enabled else 'OFF'}   •   Preview cache: {config.preview_dir}", style="dim")),
-    )
-    return Panel(body, border_style=border_style, box=box.DOUBLE)
-
-
-def render_summary_table(state: AppState) -> Table:
-    table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    table.add_column("Source", style="bold cyan", no_wrap=True)
-    table.add_column("Status", style="bold")
-    table.add_column("Count", justify="right")
-    table.add_column("Notes", overflow="fold")
-
-    for result in state.results.values():
-        if not result.available_on_system:
-            status = "[red]Missing[/red]"
-            notes = result.error or result.command_hint
-        elif result.error:
-            status = "[red]Error[/red]"
-            notes = result.error
-        elif result.available:
-            status = "[yellow]Updates available[/yellow]"
-            notes = f"Ready to install from {result.display_name}."
-        else:
-            status = "[green]Up to date[/green]"
-            notes = "Nothing pending."
-        table.add_row(result.display_name, status, str(result.count), notes)
-    return table
-
-
-def render_detail_panel(result: UpdateResult) -> Panel:
-    if result.error:
-        body = Text(result.error, style="bold red")
-        title = f"{result.display_name} details"
-        return Panel(body, title=title, border_style="red")
-
-    if not result.items:
-        return Panel(Text(f"No {result.source} updates available.", style="green"), title=f"{result.display_name} details")
-
-    table = Table(box=box.MINIMAL_DOUBLE_HEAD, expand=True, show_header=True)
-    table.add_column("Pending items", overflow="fold")
-    visible_items = result.items[:MAX_DETAIL_ROWS]
-    for item in visible_items:
-        table.add_row(item)
-    if result.count > MAX_DETAIL_ROWS:
-        table.add_row(f"… and {result.count - MAX_DETAIL_ROWS} more")
-    return Panel(table, title=f"{result.display_name} details", border_style="cyan")
-
-
-def render_dashboard(state: AppState, config: Config) -> None:
-    console.clear()
-    console.print(make_header(config, state))
-    console.print()
-    console.print(render_summary_table(state))
-    console.print()
-
-    for source in PROVIDERS:
-        if source in state.results:
-            console.print(render_detail_panel(state.results[source]))
-            console.print()
 
 
 def compose_summary_speech(state: AppState, config: Config) -> str:
@@ -1480,367 +1275,3 @@ def compose_summary_speech(state: AppState, config: Config) -> str:
         if result.available:
             parts.append(f"{result.display_name} has {result.count} updates.")
     return " ".join(parts)
-
-
-def _source_install_problem(source: str, state: AppState) -> tuple[str, str, int] | None:
-    result = state.results.get(source)
-    if result is None:
-        return "failed", f"Unknown source: {source}.", CHECK_FAILURE_EXIT
-    if not result.enabled:
-        return "skipped", f"{result.display_name} is disabled.", 0
-    if not result.available_on_system:
-        return "failed", result.error or f"{result.display_name} is not installed.", CHECK_FAILURE_EXIT
-    if result.error:
-        return "failed", f"Its check failed: {result.error}", CHECK_FAILURE_EXIT
-    if not result.available:
-        return "skipped", f"No {result.display_name} updates are pending.", 0
-    if not result.install_allowed:
-        detail = " ".join(result.security_warnings) or "Security review blocked installation."
-        return "failed", detail, SECURITY_BLOCK_EXIT
-    return None
-
-def install_many(
-    sources: list[str],
-    state: AppState,
-    config: Config,
-    *,
-    noninteractive: bool = False,
-) -> int:
-    summary = InstallSummary()
-    runnable: list[str] = []
-    for source in dict.fromkeys(sources):
-        problem = _source_install_problem(source, state)
-        if problem:
-            status, message, exit_code = problem
-            summary.add(source, status, message, exit_code)
-        else:
-            runnable.append(source)
-
-    if not runnable:
-        style = "yellow" if any(outcome.status == "failed" for outcome in summary.outcomes) else "green"
-        console.print(f"[{style}]{summary.message()}[/{style}]")
-        failures = [
-            outcome.exit_code or CHECK_FAILURE_EXIT
-            for outcome in summary.outcomes
-            if outcome.status == "failed"
-        ]
-        return failures[-1] if failures else 0
-
-    if noninteractive and any(source in ("pacman", "aur", "snap") for source in runnable):
-        try:
-            authorization = subprocess.run(
-                ["sudo", "-n", "-v"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=min(config.command_timeout, 30),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            console.print(f"[red]Could not validate non-interactive sudo authorization: {exc}[/red]")
-            return CHECK_FAILURE_EXIT
-        if authorization.returncode:
-            console.print(
-                "[red]Non-interactive installation requires a current sudo credential. "
-                "Run 'sudo -v' in this terminal, then retry.[/red]"
-            )
-            return CHECK_FAILURE_EXIT
-
-    blocking_issues = [
-        issue for issue in check_update_preflight(runnable, state, config) if issue.blocking
-    ]
-    if blocking_issues:
-        for source in runnable:
-            summary.add(source, "failed", "Preflight blocked installation: " + blocking_issues[0].message)
-        console.print(f"[bold red]{summary.message()}[/bold red]")
-        return CHECK_FAILURE_EXIT
-
-    plan = [
-        (source, command)
-        for source, command in UPDATE_CONTROLLER.build_plan(
-            runnable,
-            config,
-            noninteractive=noninteractive,
-        )
-        if command is not None
-    ]
-    planned_sources = {source for source, _command in plan}
-    for source in runnable:
-        if source not in planned_sources:
-            summary.add(source, "failed", "No usable update command was found.", CHECK_FAILURE_EXIT)
-
-    def run_one(source: str, command: list[str]) -> ExecutionOutcome:
-        speak_async(f"Installing {source} updates.", config)
-        console.print(Rule(f"Installing {source}", style="cyan"))
-        return_code = run_interactive(command, timeout=config.installation_timeout)
-        if return_code == 0:
-            return ExecutionOutcome(source, "succeeded", "Completed successfully.", 0)
-        if return_code == 124:
-            return ExecutionOutcome(source, "timed-out", "Installation timed out.", return_code)
-        if return_code == 130:
-            return ExecutionOutcome(source, "cancelled", "Interrupted by the user.", return_code)
-        return ExecutionOutcome(source, "failed", f"Exited with status {return_code}.", return_code)
-
-    summary.extend_execution(UPDATE_EXECUTOR.execute(plan, run_one))
-    style = "green" if summary.successful() else "yellow"
-    console.print(f"[{style}]{summary.message()}[/{style}]")
-    failures = [
-        outcome.exit_code or CHECK_FAILURE_EXIT
-        for outcome in summary.outcomes
-        if outcome.status not in ("succeeded", "skipped")
-    ]
-    return failures[-1] if failures else 0
-
-
-def install_source(source: str, state: AppState, config: Config) -> int:
-    return install_many([source], state, config)
-
-
-def export_json(state: AppState, destination: Path | None = None) -> str:
-    payload = json.dumps({k: v.to_dict() for k, v in state.results.items()}, indent=2)
-    if destination is not None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(payload, encoding="utf-8")
-    return payload
-
-
-def check_exit_code(state: AppState) -> int:
-    return CHECK_FAILURE_EXIT if not state.is_healthy() else 0
-
-
-MENU_TEXT = """
-[bold cyan]Actions[/bold cyan]
-  [bold]1[/bold]  Install all updates
-  [bold]2[/bold]  Install pacman only
-  [bold]3[/bold]  Install AUR only
-  [bold]4[/bold]  Install flatpak only
-  [bold]5[/bold]  Install snap only
-  [bold]6[/bold]  Install selected sources
-  [bold]7[/bold]  Refresh update check
-  [bold]8[/bold]  Toggle voice
-  [bold]9[/bold]  Test voice
-  [bold]e[/bold]  Export JSON summary
-  [bold]0[/bold]  Quit
-""".strip()
-
-
-def prompt_selected_sources(state: AppState) -> list[str]:
-    choices = [source for source, result in state.results.items() if result.available]
-    if not choices:
-        console.print("[green]Nothing to install.[/green]")
-        return []
-
-    console.print("[bold cyan]Available sources:[/bold cyan] " + ", ".join(choices))
-    raw = Prompt.ask("Enter one or more sources separated by commas", default=",".join(choices))
-    selected = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    invalid = [item for item in selected if item not in PROVIDERS]
-    if invalid:
-        console.print(f"[yellow]Ignoring unknown source(s):[/yellow] {', '.join(invalid)}")
-    return list(dict.fromkeys(item for item in selected if item in PROVIDERS))
-
-
-def interactive_loop(state: AppState, config: Config, config_path: Path, *, write_cache: bool) -> int:
-    while True:
-        render_dashboard(state, config)
-        console.print(Panel(MENU_TEXT, border_style="blue", title="Control Deck"))
-        choice = Prompt.ask("Choose an action", choices=[str(i) for i in range(10)] + ["e"], default="0")
-
-        if choice == "1":
-            install_many(list(PROVIDERS), state, config)
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-            speak_sync(compose_summary_speech(state, config), config)
-        elif choice == "2":
-            install_source("pacman", state, config)
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-        elif choice == "3":
-            install_source("aur", state, config)
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-        elif choice == "4":
-            install_source("flatpak", state, config)
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-        elif choice == "5":
-            install_source("snap", state, config)
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-        elif choice == "6":
-            selected = prompt_selected_sources(state)
-            if selected:
-                install_many(selected, state, config)
-                state = check_all_parallel(config)
-                if write_cache:
-                    write_preview_files_safely(state, config)
-        elif choice == "7":
-            state = check_all_parallel(config)
-            if write_cache:
-                write_preview_files_safely(state, config)
-            speak_async(compose_summary_speech(state, config), config)
-        elif choice == "8":
-            config.voice_enabled = not config.voice_enabled
-            config.save(config_path)
-            status = "enabled" if config.voice_enabled else "disabled"
-            console.print(f"[bold green]Voice {status}.[/bold green]")
-            if config.voice_enabled:
-                speak_sync("Voice enabled.", config)
-            time.sleep(0.2)
-        elif choice == "9":
-            console.print(f"VOICE_ENABLED={config.voice_enabled}")
-            console.print(f"PIPER_MODEL={config.piper_model}")
-            console.print(f"VOICE_LOCK={Path(config.preview_dir) / 'voice.lock'}")
-            speak_sync("Voice test successful.", config)
-            time.sleep(0.2)
-        elif choice == "e":
-            if not write_cache:
-                console.print("[yellow]JSON export is disabled by --no-cache.[/yellow]")
-            else:
-                preview_dir = Path(config.preview_dir)
-                json_path = preview_dir / "summary.json"
-                export_json(state, json_path)
-                console.print(f"[green]Exported JSON summary to[/green] {json_path}")
-                time.sleep(0.8)
-        elif choice == "0":
-            speak_sync("Update complete.", config)
-            console.print("[bold green]Update complete.[/bold green]")
-            return 0
-
-
-def parse_install_targets(raw: str) -> list[str]:
-    value = raw.strip().lower()
-    if value == "all":
-        return list(PROVIDERS)
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CachyOS multi-source update checker and installer")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to JSON config file")
-    action_group = parser.add_mutually_exclusive_group()
-    action_group.add_argument("--refresh-only", action="store_true", help="Check updates once and exit")
-    action_group.add_argument("--json", action="store_true", help="Print JSON summary and exit")
-    action_group.add_argument("--voice-test", action="store_true", help="Run voice test and exit")
-    action_group.add_argument(
-        "--update-advisory",
-        metavar="HTTPS_URL",
-        help="Download and install a versioned AUR advisory after SHA-256 authentication",
-    )
-    action_group.add_argument(
-        "--install",
-        type=str,
-        help=(
-            "Install updates with non-interactive package confirmation: all or comma-separated "
-            "sources (pacman,aur,flatpak,snap); sudo must already be authorized"
-        ),
-    )
-    parser.add_argument("--export-json", type=Path, help="Write JSON summary to a file")
-    parser.add_argument("--no-voice", action="store_true", help="Disable voice for this run")
-    parser.add_argument("--timeout", type=int, help="Override command timeout in seconds (must be positive)")
-    parser.add_argument("--no-cache", action="store_true", help="Do not write preview cache files or play voice")
-    parser.add_argument(
-        "--advisory-sha256",
-        metavar="DIGEST",
-        help="Trusted SHA-256 digest for --update-advisory",
-    )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    try:
-        config = Config.load(args.config)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        return 2
-
-    if args.no_voice:
-        config.voice_enabled = False
-    if args.no_cache:
-        config.voice_enabled = False
-    if args.timeout is not None:
-        if args.timeout <= 0:
-            console.print("[red]--timeout must be a positive integer.[/red]")
-            return 2
-        config.command_timeout = args.timeout
-
-    configure_logging(Path(config.log_file))
-    logging.info("Application started")
-
-    if args.update_advisory:
-        if not args.advisory_sha256:
-            console.print("[red]--update-advisory requires --advisory-sha256.[/red]")
-            return 2
-        try:
-            advisory = install_authenticated_advisory(
-                args.update_advisory,
-                args.advisory_sha256,
-                Path(config.advisory_cache_file),
-                timeout=config.command_timeout,
-                current_advisory=load_effective_aur_advisory(config),
-            )
-        except AdvisoryUpdateError as exc:
-            logging.error("Advisory update rejected: %s", exc)
-            console.print(f"[red]Advisory update rejected:[/red] {exc}")
-            return 2
-        console.print(
-            "[green]Authenticated AUR advisory installed:[/green] "
-            f"version {advisory['schema_version']}, updated {advisory['updated_at']}"
-        )
-        return 0
-    if args.advisory_sha256:
-        console.print("[red]--advisory-sha256 requires --update-advisory.[/red]")
-        return 2
-
-    if args.voice_test:
-        console.print(f"VOICE_ENABLED={config.voice_enabled}")
-        console.print(f"PIPER_MODEL={config.piper_model}")
-        console.print(f"VOICE_LOCK={Path(config.preview_dir) / 'voice.lock'}")
-        speak_sync("Voice test successful.", config)
-        return 0
-
-    state = check_all_parallel(config, show_progress=not args.json)
-    if not args.no_cache and not args.json:
-        write_preview_files_safely(state, config)
-
-    if args.export_json:
-        export_json(state, args.export_json)
-
-    if args.json:
-        console.print_json(export_json(state))
-        return check_exit_code(state)
-
-    if args.install:
-        targets = parse_install_targets(args.install)
-        invalid = [item for item in targets if item not in PROVIDERS]
-        if invalid:
-            console.print(f"[red]Invalid install target(s):[/red] {', '.join(invalid)}")
-            return 2
-        rc = install_many(targets, state, config, noninteractive=True)
-        refreshed = check_all_parallel(config)
-        if not args.no_cache:
-            write_preview_files_safely(refreshed, config)
-        speak_sync(compose_summary_speech(refreshed, config), config)
-        return rc or check_exit_code(refreshed)
-
-    if args.refresh_only:
-        render_dashboard(state, config)
-        speak_sync(compose_summary_speech(state, config), config)
-        return check_exit_code(state)
-
-    speak_async(compose_summary_speech(state, config), config)
-    return interactive_loop(state, config, args.config, write_cache=not args.no_cache)
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        console.print("\n[bold yellow]Interrupted by user.[/bold yellow]")
-        raise SystemExit(130)

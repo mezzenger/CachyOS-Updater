@@ -63,14 +63,6 @@ command -v paplay
 At least one audio player should be available. If the default voice path is not
 installed, choose another voice in the desktop settings window.
 
-## JSON Mode Returns a Nonzero Exit Code
-
-`./cuc.py --json` returns a nonzero status when an installed source could not be
-checked. The JSON output still contains the error details for that source.
-
-Missing optional sources are reported in the JSON but do not make the overall
-check unhealthy.
-
 ## AUR Installation Is Blocked
 
 CUC intentionally fails closed when an AUR update matches the confirmed
@@ -143,5 +135,5 @@ allowlisted helper and policy if needed:
 sudo ./scripts/install-system-helper.sh
 ```
 
-Pacman and Snap desktop installs are disabled until Polkit is ready. The
-terminal frontend remains available for manual sudo authentication.
+Pacman and Snap desktop installs are disabled until Polkit is ready. You can
+still update those sources directly with their native package-manager commands.

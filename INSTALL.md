@@ -4,10 +4,10 @@ This project is designed for CachyOS or another Arch-based system with Pacman.
 
 ## Required Runtime Packages
 
-Install the base Python and terminal dependencies:
+Install the base Python dependencies:
 
 ```sh
-sudo pacman -S python python-rich python-cryptography pacman-contrib
+sudo pacman -S python python-cryptography pacman-contrib
 ```
 
 For the desktop app, install GTK/libadwaita Python bindings:
@@ -112,13 +112,13 @@ Default preview cache:
 
 ## Arch Package
 
-The repository includes a `PKGBUILD` that installs both frontends, shared
-controller/provider modules, advisory and diagnostic support, the desktop
-launcher, and the Polkit helper and policy:
+The repository includes a `PKGBUILD` that installs the desktop application,
+shared backend modules, advisory and diagnostic support, the launcher, and the
+Polkit helper and policy:
 
 ```sh
 makepkg -si
 ```
 
-Release builds expect a matching Git tag such as `v0.5.0`. Review the PKGBUILD
+Release builds expect a matching Git tag such as `v0.5.2`. Review the PKGBUILD
 and package contents before installation.

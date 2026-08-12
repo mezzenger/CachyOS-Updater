@@ -2,19 +2,18 @@ import hashlib
 import base64
 import json
 import logging
-import subprocess
 import tempfile
 import unittest
 import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-import cuc
+import cuc_backend as cuc
 import cuc_advisory
 import cuc_diagnostics
 import cuc_privileged
@@ -228,19 +227,18 @@ class StatusTests(unittest.TestCase):
             }
         )
         self.assertTrue(state.is_healthy())
-        self.assertEqual(cuc.check_exit_code(state), 0)
 
-    def test_checker_error_changes_exit_code_and_speech(self) -> None:
+    def test_checker_error_changes_health_and_speech(self) -> None:
         state = cuc.AppState(
             {"pacman": cuc.UpdateResult("pacman", "Pacman", "", error="network unavailable")}
         )
-        self.assertEqual(cuc.check_exit_code(state), cuc.CHECK_FAILURE_EXIT)
+        self.assertFalse(state.is_healthy())
         self.assertIn("incomplete", cuc.compose_summary_speech(state, cuc.Config()).lower())
 
     def test_voice_skips_unwritable_preview_directory(self) -> None:
         config = cuc.Config(voice_enabled=True, preview_dir="/read-only-preview")
         with patch.object(cuc.Path, "is_file", return_value=True), \
-             patch("cuc.command_exists", return_value=True), \
+             patch("cuc_backend.command_exists", return_value=True), \
              patch.object(cuc.Path, "mkdir", side_effect=PermissionError("read-only")):
             cuc._speak_worker("status", config)
 
@@ -249,18 +247,18 @@ class ProviderTests(unittest.TestCase):
     def test_polkit_readiness_validates_command_files_ownership_and_mode(self) -> None:
         helper = Path("/test/cuc-privileged")
         policy = Path("/test/cuc.policy")
-        with patch("cuc.command_exists", return_value=True), \
+        with patch("cuc_backend.command_exists", return_value=True), \
              patch.object(cuc.Path, "is_file", return_value=True), \
              patch.object(cuc.Path, "stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100755)), \
              patch.object(cuc.Path, "is_symlink", return_value=False), \
-             patch("cuc.os.access", return_value=True):
+             patch("cuc_backend.os.access", return_value=True):
             readiness = cuc.check_polkit_readiness(helper, policy)
 
         self.assertTrue(readiness.ready)
         self.assertIn("ready", readiness.message.lower())
 
     def test_polkit_readiness_rejects_non_root_writable_files(self) -> None:
-        with patch("cuc.command_exists", return_value=True), \
+        with patch("cuc_backend.command_exists", return_value=True), \
              patch.object(cuc.Path, "is_file", return_value=True), \
              patch.object(cuc.Path, "stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100777)), \
              patch.object(cuc.Path, "is_symlink", return_value=False):
@@ -270,7 +268,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_configured_aur_helper_is_preferred(self) -> None:
         config = cuc.Config(aur_helper="paru")
-        with patch("cuc.command_exists", side_effect=lambda command: command == "paru"):
+        with patch("cuc_backend.command_exists", side_effect=lambda command: command == "paru"):
             self.assertEqual(cuc.find_aur_helper(config), "paru")
 
     def test_pacman_check_uses_isolated_database(self) -> None:
@@ -280,7 +278,7 @@ class ProviderTests(unittest.TestCase):
             captured_environment.update(kwargs["env"])
             return __import__("subprocess").CompletedProcess(command, 2, "", "")
 
-        with patch("cuc.command_exists", return_value=True), patch("cuc.run_capture", side_effect=fake_run_capture):
+        with patch("cuc_backend.command_exists", return_value=True), patch("cuc_backend.run_capture", side_effect=fake_run_capture):
             result = cuc.check_pacman_updates(cuc.Config())
 
         self.assertFalse(result.available)
@@ -292,24 +290,6 @@ class ProviderTests(unittest.TestCase):
         items = cuc.parse_snap_updates(output)
         self.assertEqual(len(items), 2)
         self.assertTrue(items[0].startswith("snap-store"))
-
-    def test_run_interactive_reports_command_launch_failure(self) -> None:
-        with patch("cuc.subprocess.call", side_effect=FileNotFoundError("missing command")):
-            self.assertEqual(cuc.run_interactive(["missing"]), 127)
-
-    def test_run_interactive_enforces_installation_timeout(self) -> None:
-        process = SimpleNamespace(
-            pid=123,
-            wait=Mock(
-                side_effect=[subprocess.TimeoutExpired(["slow"], 10), 0]
-            ),
-        )
-        with patch("cuc.subprocess.Popen", return_value=process), \
-             patch("cuc.os.killpg") as killpg:
-            result = cuc.run_interactive(["slow"], timeout=10)
-
-        self.assertEqual(result, 124)
-        killpg.assert_called_once_with(123, cuc.signal.SIGTERM)
 
     def test_provider_output_fixtures(self) -> None:
         pacman = cuc.parse_update_lines((FIXTURE_DIR / "pacman_updates.txt").read_text(encoding="utf-8"))
@@ -353,7 +333,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_update_command_builder_is_frontend_independent(self) -> None:
         config = cuc.Config(aur_helper="paru")
-        with patch("cuc.command_exists", side_effect=lambda command: command == "paru"):
+        with patch("cuc_backend.command_exists", side_effect=lambda command: command == "paru"):
             commands = cuc.build_update_commands(
                 ["pacman", "aur", "flatpak", "snap"],
                 config,
@@ -436,7 +416,7 @@ class UpdateFlowTests(unittest.TestCase):
                 "snap": False,
             }
         )
-        with patch("cuc.check_snap_updates") as snap_check:
+        with patch("cuc_backend.check_snap_updates") as snap_check:
             state = cuc.check_all_parallel(
                 config,
                 show_progress=False,
@@ -465,9 +445,9 @@ class UpdateFlowTests(unittest.TestCase):
             lock = Path(directory) / "db.lck"
             lock.touch()
             disk_usage = type("DiskUsage", (), {"free": 100 * 1024 * 1024})()
-            with patch("cuc.shutil.disk_usage", return_value=disk_usage), \
+            with patch("cuc_backend.shutil.disk_usage", return_value=disk_usage), \
                  patch(
-                     "cuc._running_package_managers",
+                     "cuc_backend._running_package_managers",
                      return_value=[cuc.RunningPackageManager("pacman", 4321)],
                  ):
                 issues = cuc.check_update_preflight(
@@ -499,7 +479,7 @@ class UpdateFlowTests(unittest.TestCase):
             }
         )
         running_snap = [cuc.RunningPackageManager("snap", 2468)]
-        with patch("cuc._running_package_managers", return_value=running_snap):
+        with patch("cuc_backend._running_package_managers", return_value=running_snap):
             system_issues = cuc.check_update_preflight(["pacman", "aur"], state, cuc.Config())
             snap_issues = cuc.check_update_preflight(["snap"], state, cuc.Config())
 
@@ -554,31 +534,6 @@ class UpdateFlowTests(unittest.TestCase):
             lambda source, _command: ExecutionOutcome(source, "cancelled", "cancelled", 130),
         )
         self.assertEqual([outcome.status for outcome in outcomes], ["cancelled", "skipped"])
-
-    def test_scripted_install_uses_noninteractive_commands_and_preflight(self) -> None:
-        state = cuc.AppState(
-            {
-                "pacman": cuc.UpdateResult(
-                    "pacman",
-                    "Pacman",
-                    "",
-                    available=True,
-                    count=1,
-                )
-            }
-        )
-        with patch("cuc.check_update_preflight", return_value=[]) as preflight, \
-             patch("cuc.subprocess.run", return_value=SimpleNamespace(returncode=0)), \
-             patch("cuc.run_interactive", return_value=0) as run, \
-             patch("cuc.speak_async"):
-            result = cuc.install_many(["pacman"], state, cuc.Config(), noninteractive=True)
-        self.assertEqual(result, 0)
-        preflight.assert_called_once()
-        self.assertEqual(
-            run.call_args.args[0],
-            ["sudo", "-n", "pacman", "-Syu", "--noconfirm"],
-        )
-
 
 class AdvisoryUpdateTests(unittest.TestCase):
     def valid_advisory(self, updated_at: str = "2026-08-06") -> dict:

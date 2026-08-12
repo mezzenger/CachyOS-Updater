@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>CachyOS Update Center</vendor>
-  <vendor_url>https://github.com/alvin/CachyOS-Updater</vendor_url>
+  <vendor_url>https://github.com/mezzenger/CachyOS-Updater</vendor_url>
   <action id="io.github.alvin.Cuc.update">
     <description>Install system updates</description>
     <message>Authentication is required to install system updates</message>

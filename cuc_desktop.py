@@ -21,7 +21,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-import cuc  # noqa: E402
+import cuc_backend as cuc  # noqa: E402
 
 
 APP_ID = "io.github.alvin.Cuc"
@@ -748,11 +748,6 @@ class UpdateWindow(Adw.ApplicationWindow):
         )
         export_diagnostics.connect("clicked", lambda *_: self.export_diagnostic_bundle())
         footer.append(export_diagnostics)
-        open_terminal = Gtk.Button(label="Open terminal")
-        open_terminal.set_halign(Gtk.Align.END)
-        open_terminal.set_hexpand(True)
-        open_terminal.connect("clicked", lambda *_: self.open_terminal())
-        footer.append(open_terminal)
         toolbar_view.add_bottom_bar(footer)
 
         self.install_css()
@@ -1145,8 +1140,8 @@ class UpdateWindow(Adw.ApplicationWindow):
             application_icon="software-update-available-symbolic",
             developer_name="Alvin and contributors",
             version=cuc.__version__,
-            website="https://github.com/alvin/CachyOS-Updater",
-            issue_url="https://github.com/alvin/CachyOS-Updater/issues",
+            website="https://github.com/mezzenger/CachyOS-Updater",
+            issue_url="https://github.com/mezzenger/CachyOS-Updater/issues",
             copyright="© 2026 Alvin",
         )
         dialog.set_developers(["Alvin"])
@@ -1419,7 +1414,7 @@ class UpdateWindow(Adw.ApplicationWindow):
             message = (
                 "Native Polkit integration is required for desktop system updates. "
                 + polkit.message
-                + " Install it or use the terminal frontend."
+                + " Install it or update that source manually."
             )
             logging.error(message)
             self.show_notice(message)
@@ -1731,16 +1726,6 @@ class UpdateWindow(Adw.ApplicationWindow):
             terminate_timer = threading.Timer(5, terminate_if_needed)
             terminate_timer.daemon = True
             terminate_timer.start()
-
-    def open_terminal(self) -> None:
-        terminal = next((name for name in ("kgx", "gnome-terminal", "xterm") if shutil.which(name)), None)
-        if terminal is None:
-            self.show_notice("No terminal emulator was found.")
-            return
-        try:
-            subprocess.Popen([terminal], start_new_session=True)
-        except OSError as exc:
-            self.show_notice(f"Could not open the terminal: {exc}")
 
     def export_diagnostic_bundle(self) -> None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
