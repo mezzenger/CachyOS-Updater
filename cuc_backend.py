@@ -39,6 +39,7 @@ from cuc_providers import ProviderRegistry, UpdateProvider
 
 APP_NAME = "cachyos-update-center"
 __version__ = "0.6.0"
+ALL_CURRENT_STATUS = "Annoyingly current"
 DEFAULT_PIPER_MODEL = "/usr/share/piper-voices/en/en_GB/alba/medium/en_GB-alba-medium.onnx"
 DEFAULT_PREVIEW_DIR = Path.home() / ".cache" / "update-check-preview"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / APP_NAME / "config.json"

@@ -27,6 +27,12 @@ class ConfigTests(unittest.TestCase):
     def test_application_version_uses_semantic_versioning(self) -> None:
         self.assertRegex(cuc.__version__, r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
+    def test_all_current_status_keeps_the_grumpy_success_message(self) -> None:
+        self.assertEqual(
+            cuc.ALL_CURRENT_STATUS,
+            "Annoyingly current",
+        )
+
     def test_missing_config_uses_defaults_without_creating_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -741,6 +747,10 @@ class PrivilegedHelperTests(unittest.TestCase):
 
 
 class DesktopSecurityRegressionTests(unittest.TestCase):
+    def test_desktop_uses_shared_all_current_status(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        self.assertIn("self.headline.set_text(cuc.ALL_CURRENT_STATUS)", source)
+
     def test_desktop_uses_no_password_entry_or_inherited_credential_pipe(self) -> None:
         source = Path("cuc_desktop.py").read_text(encoding="utf-8")
         self.assertNotIn("Gtk.PasswordEntry", source)

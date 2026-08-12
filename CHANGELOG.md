@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Give the desktop all-clear state a grumpier success message.
+
 ## 0.6.0 — 2026-08-12
 
 - Remove the terminal dashboard, JSON/scripted CLI, and `/usr/bin/cuc`

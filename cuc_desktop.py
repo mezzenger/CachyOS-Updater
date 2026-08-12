@@ -1111,7 +1111,7 @@ class UpdateWindow(Adw.ApplicationWindow):
                 )
                 self.send_notification("Updates blocked", self.source_summary.get_text())
         else:
-            self.headline.set_text("Everything is current")
+            self.headline.set_text(cuc.ALL_CURRENT_STATUS)
             suffix = f" Unavailable: {', '.join(result.display_name for result in unavailable)}." if unavailable else ""
             self.subheadline.set_text(f"All installed sources are up to date.{suffix}")
             self.set_overview_badge("All current", "overview-current")
