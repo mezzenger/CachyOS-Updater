@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 — 2026-08-12
+
+- Remember the desktop window's last normal size and maximized state.
+
 ## 0.5.1 — 2026-08-12
 
 - Scope running-package-manager preflight conflicts to update sources that

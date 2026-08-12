@@ -548,8 +548,12 @@ class SettingsWindow(Adw.PreferencesDialog):
 class UpdateWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="Cachy Update Center")
-        self.set_default_size(960, 640)
+        window_state = cuc.load_window_state()
+        self.set_default_size(window_state.width, window_state.height)
         self.set_size_request(460, 480)
+        if window_state.maximized:
+            self.maximize()
+        self.connect("close-request", self.persist_window_state)
         self.config_warning: str | None = None
         self.config = self.load_config()
         cuc.configure_logging(Path(self.config.log_file))
@@ -754,6 +758,16 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.install_css()
         self.install_keyboard_shortcuts(application)
         self.refresh()
+
+    def persist_window_state(self, *_args) -> bool:
+        width, height = self.get_default_size()
+        try:
+            cuc.save_window_state(
+                cuc.WindowState(width, height, self.is_maximized())
+            )
+        except OSError as exc:
+            logging.warning("Could not persist desktop window state: %s", exc)
+        return False
 
     def load_config(self) -> cuc.Config:
         try:

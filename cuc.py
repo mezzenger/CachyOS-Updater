@@ -64,11 +64,14 @@ except ImportError:
     sys.exit(1)
 
 APP_NAME = "cachyos-update-center"
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 DEFAULT_PIPER_MODEL = "/usr/share/piper-voices/en/en_GB/alba/medium/en_GB-alba-medium.onnx"
 DEFAULT_PREVIEW_DIR = Path.home() / ".cache" / "update-check-preview"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / APP_NAME / "config.json"
 DEFAULT_LOG_PATH = Path.home() / ".local" / "state" / APP_NAME / "app.log"
+DEFAULT_WINDOW_STATE_PATH = Path(
+    os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+) / APP_NAME / "window-state.json"
 DEFAULT_ADVISORY_CACHE = Path.home() / ".cache" / APP_NAME / "aur-security-advisories.json"
 DEFAULT_TIMEOUT = 120
 MAX_DETAIL_ROWS = 18
@@ -99,6 +102,54 @@ voice_thread_lock = threading.Lock()
 
 class ConfigError(ValueError):
     """Raised when a configuration file cannot be safely used."""
+
+
+@dataclass(frozen=True, slots=True)
+class WindowState:
+    width: int = 960
+    height: int = 640
+    maximized: bool = False
+
+
+def load_window_state(path: Path = DEFAULT_WINDOW_STATE_PATH) -> WindowState:
+    """Load safe desktop geometry, falling back when state is absent or damaged."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        width = payload["width"]
+        height = payload["height"]
+        maximized = payload["maximized"]
+        if (
+            not isinstance(payload, dict)
+            or isinstance(width, bool)
+            or not isinstance(width, int)
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or not isinstance(maximized, bool)
+        ):
+            raise ValueError("invalid window state")
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return WindowState()
+    return WindowState(
+        width=max(460, min(width, 16384)),
+        height=max(480, min(height, 16384)),
+        maximized=maximized,
+    )
+
+
+def save_window_state(
+    state: WindowState,
+    path: Path = DEFAULT_WINDOW_STATE_PATH,
+) -> None:
+    """Atomically persist desktop geometry without touching user configuration."""
+    normalized = WindowState(
+        width=max(460, min(state.width, 16384)),
+        height=max(480, min(state.height, 16384)),
+        maximized=bool(state.maximized),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(asdict(normalized), indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def validate_signed_advisory_settings(

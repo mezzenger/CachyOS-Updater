@@ -1,5 +1,5 @@
 pkgname=cachyos-update-center
-pkgver=0.5.1
+pkgver=0.5.2
 pkgrel=1
 pkgdesc="Multi-source update dashboard for Pacman, AUR, Flatpak, and Snap"
 arch=('any')

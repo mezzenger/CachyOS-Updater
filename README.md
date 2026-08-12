@@ -136,6 +136,9 @@ Settings requires the two feed locations to use HTTPS and the public key to use
 an absolute file path. Leave all three fields blank unless they were supplied
 by a trusted advisory publisher.
 
+The desktop remembers its last normal window size and maximized state in the
+XDG state directory. Damaged or out-of-range window state is ignored safely.
+
 ## Architecture
 
 - `cuc.py`: shared models, terminal frontend, provider implementations, and

@@ -147,6 +147,29 @@ class ConfigTests(unittest.TestCase):
                 cuc.Config.load(path)
 
 
+class WindowStateTests(unittest.TestCase):
+    def test_window_state_round_trip_clamps_unsafe_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "window-state.json"
+            cuc.save_window_state(cuc.WindowState(320, 99999, True), path)
+
+            self.assertEqual(cuc.load_window_state(path), cuc.WindowState(460, 16384, True))
+
+    def test_window_state_uses_defaults_for_missing_or_invalid_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "window-state.json"
+            self.assertEqual(cuc.load_window_state(path), cuc.WindowState())
+
+            path.write_text(
+                json.dumps({"width": True, "height": 700, "maximized": False}),
+                encoding="utf-8",
+            )
+            self.assertEqual(cuc.load_window_state(path), cuc.WindowState())
+
+            path.write_text("{invalid json", encoding="utf-8")
+            self.assertEqual(cuc.load_window_state(path), cuc.WindowState())
+
+
 class StatusTests(unittest.TestCase):
     def test_batch_install_targets_exclude_blocked_and_failed_sources(self) -> None:
         state = cuc.AppState(
