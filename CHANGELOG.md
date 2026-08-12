@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-08-12
+
 - Remove the terminal dashboard, JSON/scripted CLI, and `/usr/bin/cuc`
   packaging entry point; CachyOS Update Center is now desktop-only.
 - Rename the shared non-executable module from `cuc.py` to `cuc_backend.py` and

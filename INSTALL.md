@@ -120,5 +120,5 @@ Polkit helper and policy:
 makepkg -si
 ```
 
-Release builds expect a matching Git tag such as `v0.5.2`. Review the PKGBUILD
+Release builds expect a matching Git tag such as `v0.6.0`. Review the PKGBUILD
 and package contents before installation.
