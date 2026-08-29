@@ -297,6 +297,16 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertTrue(items[0].startswith("snap-store"))
 
+    def test_snap_parser_does_not_discard_a_package_named_name(self) -> None:
+        output = (
+            "Name  Version  Rev  Size  Publisher  Notes\n"
+            "name  1.0      1    1MB   example    -\n"
+        )
+        self.assertEqual(
+            cuc.parse_snap_updates(output),
+            ["name  1.0      1    1MB   example    -"],
+        )
+
     def test_provider_output_fixtures(self) -> None:
         pacman = cuc.parse_update_lines((FIXTURE_DIR / "pacman_updates.txt").read_text(encoding="utf-8"))
         aur = cuc.parse_update_lines((FIXTURE_DIR / "aur_updates.txt").read_text(encoding="utf-8"))
@@ -307,6 +317,22 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(pacman), 2)
         self.assertEqual(cuc.aur_package_name(aur[0]), "google-chrome")
         self.assertEqual(len(flatpak), 2)
+
+    def test_complete_update_list_is_not_truncated(self) -> None:
+        items = [f"package-{index} 1.0 -> 2.0" for index in range(250)]
+        result = cuc.UpdateResult(
+            "pacman",
+            "Pacman",
+            "",
+            available=True,
+            count=len(items),
+            items=items,
+        )
+        formatted = cuc.format_update_list([result])
+        self.assertIn("Pacman — 250 updates", formatted)
+        self.assertIn(items[0], formatted)
+        self.assertIn(items[-1], formatted)
+        self.assertEqual(sum(item in formatted for item in items), len(items))
 
     def test_aur_security_blocks_confirmed_and_orphaned_packages(self) -> None:
         advisory = {
@@ -687,6 +713,9 @@ class DiagnosticsTests(unittest.TestCase):
             config = cuc.Config(
                 log_file=str(log_path),
                 spoken_name="Private Name",
+                advisory_feed_url="https://user:password@example.com/feed?token=hunter2",
+                advisory_signature_url="https://example.com/feed.sig?secret=hunter2",
+                advisory_public_key_file=str(root / "private-key.pem"),
             )
             state = cuc.AppState(
                 {
@@ -711,6 +740,11 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertNotIn("user@example.com", log_text)
             self.assertNotIn(str(Path.home()), log_text)
             self.assertNotIn("Private Name", config_text)
+            self.assertNotIn("hunter2", config_text)
+            self.assertNotIn("user:password", config_text)
+            self.assertNotIn("private-key.pem", config_text)
+            self.assertEqual(config_text.count("<redacted-url>"), 2)
+            self.assertIn("<redacted-path>", config_text)
             self.assertNotIn("private-package-name", state_text)
 
     def test_logging_uses_a_rotating_file_handler(self) -> None:
@@ -750,6 +784,42 @@ class DesktopSecurityRegressionTests(unittest.TestCase):
     def test_desktop_uses_shared_all_current_status(self) -> None:
         source = Path("cuc_desktop.py").read_text(encoding="utf-8")
         self.assertIn("self.headline.set_text(cuc.ALL_CURRENT_STATUS)", source)
+        self.assertNotIn('self.set_overview_badge("All current"', source)
+        self.assertIn("self.overview_badge.set_visible(False)", source)
+
+    def test_update_cards_keep_compact_actions_and_details_in_review(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        self.assertNotIn("self.items = Gtk.Label", source)
+        self.assertNotIn("self.more_packages", source)
+        self.assertIn("grid = Gtk.Grid()", source)
+        self.assertNotIn("grid = Gtk.FlowBox()", source)
+        self.assertIn("grid.attach(card, index % 2, index // 2, 1, 1)", source)
+        self.assertIn(
+            'self.review_button = Gtk.Button.new_from_icon_name("view-list-symbolic")',
+            source,
+        )
+        self.assertIn(
+            'self.install_all_button = Gtk.Button.new_from_icon_name('
+            '"system-software-install-symbolic")',
+            source,
+        )
+        self.assertIn("packages = Gtk.TextView()", source)
+        self.assertIn('copy_button = Gtk.Button(label="Copy complete list")', source)
+        self.assertIn("self.get_clipboard().set(GObject.Value(str, package_text))", source)
+        self.assertIn("package_text = cuc.format_update_list(results)", source)
+        self.assertIn('"\\n".join(result.items) or "Package details unavailable"', source)
+
+    def test_desktop_source_logo_assets_are_packaged_and_used(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        installer = Path("scripts/install-user.sh").read_text(encoding="utf-8")
+        package = Path("PKGBUILD").read_text(encoding="utf-8")
+        for name in ("pacman", "aur", "flatpak", "snap"):
+            logo = Path("assets/source-icons") / f"{name}.png"
+            self.assertTrue(logo.is_file())
+            self.assertGreater(logo.stat().st_size, 0)
+            self.assertIn("assets/source-icons", installer)
+            self.assertIn(str(logo), package)
+        self.assertIn("Gtk.Image.new_from_file", source)
 
     def test_desktop_uses_no_password_entry_or_inherited_credential_pipe(self) -> None:
         source = Path("cuc_desktop.py").read_text(encoding="utf-8")

@@ -26,6 +26,14 @@ package() {
     "$pkgdir/usr/lib/cachyos-update-center/"
   install -m644 cuc_backend.py cuc_advisory.py cuc_controller.py cuc_diagnostics.py \
     cuc_providers.py "$pkgdir/usr/lib/cachyos-update-center/"
+  install -Dm644 assets/source-icons/pacman.png \
+    "$pkgdir/usr/lib/cachyos-update-center/assets/source-icons/pacman.png"
+  install -Dm644 assets/source-icons/aur.png \
+    "$pkgdir/usr/lib/cachyos-update-center/assets/source-icons/aur.png"
+  install -Dm644 assets/source-icons/flatpak.png \
+    "$pkgdir/usr/lib/cachyos-update-center/assets/source-icons/flatpak.png"
+  install -Dm644 assets/source-icons/snap.png \
+    "$pkgdir/usr/lib/cachyos-update-center/assets/source-icons/snap.png"
   install -Dm644 data/aur-security-advisories.json \
     "$pkgdir/usr/lib/cachyos-update-center/data/aur-security-advisories.json"
 

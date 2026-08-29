@@ -300,6 +300,16 @@ class UpdateResult:
         return asdict(self)
 
 
+def format_update_list(results: Iterable[UpdateResult]) -> str:
+    """Format every pending item for display or clipboard export without truncation."""
+    sections: list[str] = []
+    for result in results:
+        noun = "update" if result.count == 1 else "updates"
+        items = "\n".join(result.items) or "Package details unavailable"
+        sections.append(f"{result.display_name} — {result.count} {noun}\n{items}")
+    return "\n\n".join(sections)
+
+
 @dataclass(slots=True)
 class AppState:
     results: dict[str, UpdateResult] = field(default_factory=dict)
@@ -968,9 +978,10 @@ def parse_snap_updates(output: str) -> list[str]:
         line = raw.strip()
         if not line or line == "All snaps up to date.":
             continue
-        # The table header starts with the exact column name "Name". Package
-        # names such as snap-store and snapcraft are legitimate data rows.
-        if line.split(maxsplit=1)[0].lower() == "name":
+        # Match the header columns, rather than just the first word: ``name``
+        # is itself a valid Snap package name.
+        columns = line.lower().split()
+        if columns[:3] == ["name", "version", "rev"]:
             continue
         items.append(raw.rstrip())
     return items

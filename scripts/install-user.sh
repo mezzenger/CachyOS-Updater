@@ -13,7 +13,7 @@ cuc_install_dir="$cuc_install_root/$cuc_version"
 cuc_current_dir="$cuc_install_root/current"
 cuc_application_dir="$cuc_data_home/applications"
 
-mkdir -p "$cuc_install_dir/data" "$cuc_application_dir"
+mkdir -p "$cuc_install_dir/assets/source-icons" "$cuc_install_dir/data" "$cuc_application_dir"
 rm -f -- "$cuc_install_dir/cuc.py"
 install -m 755 "$cuc_source_dir/cuc_desktop.py" "$cuc_install_dir/cuc_desktop.py"
 install -m 644 "$cuc_source_dir/cuc_backend.py" "$cuc_install_dir/cuc_backend.py"
@@ -21,6 +21,8 @@ install -m 644 "$cuc_source_dir/cuc_advisory.py" "$cuc_install_dir/cuc_advisory.
 install -m 644 "$cuc_source_dir/cuc_controller.py" "$cuc_install_dir/cuc_controller.py"
 install -m 644 "$cuc_source_dir/cuc_diagnostics.py" "$cuc_install_dir/cuc_diagnostics.py"
 install -m 644 "$cuc_source_dir/cuc_providers.py" "$cuc_install_dir/cuc_providers.py"
+install -m 644 "$cuc_source_dir"/assets/source-icons/*.png \
+  "$cuc_install_dir/assets/source-icons/"
 install -m 644 "$cuc_source_dir/data/aur-security-advisories.json" \
   "$cuc_install_dir/data/aur-security-advisories.json"
 ln -sfn "$cuc_version" "$cuc_current_dir"

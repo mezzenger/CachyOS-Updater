@@ -17,10 +17,11 @@ The app follows three steps:
 2. Review package lists and any AUR safety findings.
 3. Confirm the selected sources and install.
 
-Each source card shows status, update count, and a package preview. Open the
-extended list to see every item. The review dialog lets you include or omit
-individual sources and clearly separates sources blocked by failed checks or
-AUR safety findings.
+Each source card shows status and update count. Use its list button to open a
+scrollable, selectable view of every pending item for that source. The review
+also has a `Copy complete list` button for saving or sharing large lists. It
+lets you include or omit individual sources and clearly separates sources
+blocked by failed checks or AUR safety findings.
 
 ## Configure the App
 
