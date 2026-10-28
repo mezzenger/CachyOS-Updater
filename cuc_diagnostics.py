@@ -44,15 +44,9 @@ def _safe_config(config: Any) -> dict[str, Any]:
         "piper_model",
         "preview_dir",
         "log_file",
-        "advisory_cache_file",
     ):
         if field_name in payload:
             payload[field_name] = sanitize_diagnostic_text(str(payload[field_name]))
-    if payload.get("advisory_public_key_file"):
-        payload["advisory_public_key_file"] = "<redacted-path>"
-    for field_name in ("advisory_feed_url", "advisory_signature_url"):
-        if payload.get(field_name):
-            payload[field_name] = "<redacted-url>"
     return payload
 
 
@@ -91,7 +85,7 @@ def export_diagnostics(
         "application_version": app_version,
         "commands": {
             command: shutil.which(command) is not None
-            for command in ("pacman", "checkupdates", "yay", "paru", "pikaur", "flatpak", "snap", "pkexec")
+            for command in ("pacman", "checkupdates", "flatpak", "pkexec")
         },
     }
     log_text = ""

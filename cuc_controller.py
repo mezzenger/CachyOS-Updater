@@ -30,7 +30,7 @@ CommandRunner = Callable[[str, list[str]], ExecutionOutcome]
 class UpdateExecutor:
     """Apply dependency-aware continuation policy to desktop installs."""
 
-    dependencies = {"aur": {"pacman"}}
+    dependencies: dict[str, set[str]] = {}
     stop_statuses = {"cancelled", "timed-out"}
 
     def execute(

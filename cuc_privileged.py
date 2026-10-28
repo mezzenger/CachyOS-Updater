@@ -11,7 +11,6 @@ import sys
 
 COMMANDS = {
     "pacman": ["/usr/bin/pacman", "-Syu", "--noconfirm"],
-    "snap": ["/usr/bin/snap", "refresh"],
 }
 
 

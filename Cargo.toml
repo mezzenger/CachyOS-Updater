@@ -1,0 +1,28 @@
+[package]
+name = "cachyos-update-center"
+version = "0.7.2"
+edition = "2024"
+rust-version = "1.85"
+description = "Native GTK update dashboard for Pacman and Flatpak"
+
+[lib]
+path = "rust/lib.rs"
+
+[[bin]]
+name = "cuc-desktop"
+path = "rust/main.rs"
+
+[[bin]]
+name = "cuc-privileged"
+path = "rust/bin/privileged.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

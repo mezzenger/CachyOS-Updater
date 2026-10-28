@@ -1,0 +1,97 @@
+.overview-panel {
+          padding: 18px;
+          border-radius: 16px;
+          background: @card_bg_color;
+          border: 1px solid alpha(@window_fg_color, 0.14);
+          box-shadow: 0 2px 8px alpha(#000000, 0.08);
+        }
+        .overview-icon-well, .source-icon-well {
+          border-radius: 999px;
+          background: alpha(@window_fg_color, 0.08);
+          color: @window_fg_color;
+        }
+        .overview-icon-well {
+          min-width: 56px;
+          min-height: 56px;
+          background: alpha(#D4AF37, 0.22);
+        }
+        .source-icon-well {
+          min-width: 44px;
+          min-height: 44px;
+        }
+        .overview-icon { color: #D4AF37; }
+        .source-icon { color: @window_fg_color; }
+        .overview-badge, .count-pill, .status-chip {
+          border-radius: 999px;
+          font-weight: 700;
+        }
+        .overview-badge {
+          padding: 6px 10px;
+          background: alpha(@window_fg_color, 0.08);
+        }
+        .overview-checking { color: @window_fg_color; }
+        .overview-ready { color: @warning_color; }
+        .overview-current { color: @success_color; }
+        .overview-error { color: @error_color; }
+        .source-card {
+          padding: 14px;
+          border-radius: 16px;
+          background: @card_bg_color;
+          border: 1px solid alpha(@borders, 0.72);
+          box-shadow: 0 1px 3px alpha(#000000, 0.07);
+        }
+        .source-card:hover {
+          border-color: alpha(@window_fg_color, 0.28);
+          box-shadow: 0 4px 12px alpha(#000000, 0.10);
+        }
+        .count-pill {
+          min-width: 26px;
+          padding: 5px 9px;
+          background: alpha(@window_fg_color, 0.08);
+          color: @window_fg_color;
+          font-size: 18px;
+        }
+        .primary-action {
+          background: @window_fg_color;
+          color: @window_bg_color;
+          font-weight: 700;
+        }
+        .primary-action:hover {
+          background: alpha(@window_fg_color, 0.84);
+        }
+        .workflow {
+          padding: 0 6px;
+        }
+        .step-number {
+          min-width: 24px;
+          min-height: 24px;
+          border-radius: 999px;
+          background: alpha(@window_fg_color, 0.10);
+          font-weight: 700;
+        }
+        .package-preview {
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: alpha(@window_fg_color, 0.045);
+        }
+        .status-chip { font-size: 0.92em; }
+        .status-ok { color: @success_color; }
+        .status-warn { color: @warning_color; }
+        .status-error { color: @error_color; }
+        .notice {
+          padding: 12px 14px;
+          border-radius: 12px;
+          background: alpha(@warning_bg_color, 0.18);
+        }
+        .security-banner {
+          padding: 14px 16px;
+          border-radius: 12px;
+          background: alpha(@warning_bg_color, 0.15);
+          border: 1px solid alpha(@warning_color, 0.35);
+        }
+        .section-header { padding: 6px 4px 0; }
+        .footer {
+          padding: 10px 20px;
+          background: @headerbar_bg_color;
+          border-top: 1px solid alpha(@borders, 0.80);
+        }
