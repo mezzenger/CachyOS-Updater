@@ -6,10 +6,30 @@ use crate::{
 use std::{
     fs,
     path::Path,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 static VOICE: Mutex<()> = Mutex::new(());
+static JOBS: AtomicUsize = AtomicUsize::new(0);
+struct VoiceJob;
+impl VoiceJob {
+    fn new() -> Self {
+        JOBS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for VoiceJob {
+    fn drop(&mut self) {
+        JOBS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+/// Includes queued announcements and synthesis, through player exit or failure.
+pub fn is_busy() -> bool {
+    JOBS.load(Ordering::SeqCst) != 0
+}
 // Only a compact loudness envelope is shared with GTK, never audio or widgets.
 #[derive(Default)]
 struct SpeechMeter {
@@ -110,7 +130,9 @@ fn wav_meter(wav: &[u8]) -> Option<SpeechMeter> {
 /// Announce after completed checks, or repeat/sample on explicit user action.
 /// Smoke tests never call this function.
 pub fn speak(c: Config, text: String) {
+    let job = VoiceJob::new();
     std::thread::spawn(move || {
+        let _job = job;
         let Ok(_guard) = VOICE.lock() else {
             return;
         };
@@ -321,6 +343,24 @@ pub(crate) fn raw_commands(c: &Config, pipewire: bool) -> (CommandSpec, CommandS
 
 #[cfg(test)]
 mod meter_tests {
+    #[test]
+    fn voice_activity_covers_queued_jobs_and_cleans_up_on_exit() {
+        assert!(!super::is_busy());
+        let first = super::VoiceJob::new();
+        let queued = super::VoiceJob::new();
+        assert!(super::is_busy());
+        drop(first);
+        assert!(super::is_busy());
+        drop(queued);
+        assert!(!super::is_busy());
+        let unavailable = || {
+            let _job = super::VoiceJob::new();
+            assert!(super::is_busy());
+            Err::<(), _>("voice unavailable")
+        };
+        assert!(unavailable().is_err());
+        assert!(!super::is_busy());
+    }
     use super::*;
     #[test]
     fn meter_clears_on_completion_or_error() {

@@ -1,6 +1,6 @@
 [package]
 name = "cachyos-update-center"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 rust-version = "1.85"
 description = "Native GTK update dashboard for Pacman and Flatpak"

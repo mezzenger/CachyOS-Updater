@@ -1,3 +1,20 @@
+# Compact dashboard and completion feedback — 0.7.3
+
+- Start with a compact 476 × 480 dashboard, fitting its size to the displayed
+  content and available screen space instead of reopening at an expanded size.
+- Install approved updates in the background with a short status, cancellation,
+  and full command output in the application log.
+- Highlight active Check, Review and Install steps in bright green; pulse busy
+  steps every 0.8 seconds and remember when Review has been opened.
+- Replace the completion dialog with Alba's announcement and a flash on the
+  verified up-to-date status. Refresh the dashboard before starting speech.
+- After queued speech, synthesis and playback finish, brighten the three steps
+  and top status together, then fade to their normal colors over two seconds.
+- Respect disabled desktop animations and keep blocked or failed update details
+  visible inline. Preserve Polkit, preflight, cancellation and rollback safeguards.
+- Add regression coverage for outcome wording, voice activity, and completion
+  timing, plus offline previews of the flash, shared fade and inline failures.
+
 # Speech waveform — 0.7.2
 
 - Add the GitHub updater's centered green waveform to the native GTK dashboard.

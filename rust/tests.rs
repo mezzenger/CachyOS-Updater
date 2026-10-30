@@ -14,6 +14,47 @@ use std::{
     time::{Duration, Instant},
 };
 struct Temp(PathBuf);
+#[test]
+fn installation_reports_preserve_partial_failure_and_interruption() {
+    use crate::{presentation::installation_report, updates::Outcome};
+    let outcome = |source: &str, status: &str| Outcome {
+        source: source.into(),
+        status: status.into(),
+        message: format!("{source}: {status}"),
+        exit_code: None,
+    };
+    let success = installation_report(&Ok(vec![outcome("pacman", "succeeded")]), true);
+    assert_eq!(success.title, "Updates completed");
+    assert!(success.body.contains("Pacman: Updated successfully"));
+    assert!(success.body.contains("A reboot is recommended"));
+    assert!(success.speech.contains("A reboot is recommended"));
+    for status in ["failed", "cancelled", "timed-out", "skipped"] {
+        let report = installation_report(
+            &Ok(vec![
+                outcome("pacman", "succeeded"),
+                outcome("flatpak", status),
+            ]),
+            false,
+        );
+        assert_eq!(report.title, "Updates need attention");
+        assert!(report.body.contains("Pacman: Updated successfully"));
+        assert!(report.body.contains(&format!("flatpak: {status}")));
+        assert!(report.speech.contains(&format!("flatpak: {status}")));
+        assert!(!report.body.contains("reboot"));
+    }
+    let blocked = installation_report(&Err("Pacman database is locked".into()), false);
+    assert_eq!(blocked.title, "Updates need attention");
+    assert!(
+        blocked
+            .body
+            .contains("Installation blocked: Pacman database is locked")
+    );
+    assert!(!blocked.speech.contains("Updated successfully"));
+    assert_eq!(
+        installation_report(&Ok(vec![]), false).title,
+        "Updates need attention"
+    );
+}
 impl Temp {
     fn new() -> Self {
         static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

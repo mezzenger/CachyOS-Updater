@@ -1,5 +1,65 @@
 //! Shared wording for the original compact dashboard and Piper announcements.
-use crate::{config::Config, updates::UpdateResult};
+use crate::{
+    config::Config,
+    updates::{Outcome, UpdateResult},
+};
+
+pub struct InstallationReport {
+    pub title: &'static str,
+    pub body: String,
+    pub speech: String,
+}
+
+/// Describe recorded outcomes only; a completed process may have failed,
+/// timed out, or been cancelled, and a preflight error installed nothing.
+pub fn installation_report(
+    result: &Result<Vec<Outcome>, String>,
+    reboot: bool,
+) -> InstallationReport {
+    let successful = result.as_ref().is_ok_and(|outcomes| {
+        !outcomes.is_empty() && outcomes.iter().all(|o| o.status == "succeeded")
+    });
+    let title = if successful {
+        "Updates completed"
+    } else {
+        "Updates need attention"
+    };
+    let details = match result {
+        Err(e) => format!("Installation blocked: {e}"),
+        Ok(outcomes) if outcomes.is_empty() => "No update results were recorded.".into(),
+        Ok(outcomes) => outcomes
+            .iter()
+            .map(|o| {
+                let status = match o.status.as_str() {
+                    "succeeded" => "Updated successfully",
+                    "cancelled" => "Cancelled",
+                    "timed-out" => "Timed out",
+                    "skipped" => "Skipped",
+                    _ => "Failed",
+                };
+                let detail = if o.status == "succeeded" {
+                    String::new()
+                } else {
+                    format!("\n{}", o.message)
+                };
+                format!("{}: {status}{detail}", name(&o.source))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    };
+    let reboot_note = if reboot {
+        "\n\nA reboot is recommended."
+    } else {
+        ""
+    };
+    InstallationReport {
+        title,
+        body: format!(
+            "{details}{reboot_note}\n\nFull command output is saved in the application log."
+        ),
+        speech: format!("{title}. {details}{reboot_note}"),
+    }
+}
 pub fn name(source: &str) -> &str {
     match source {
         "pacman" => "Pacman",

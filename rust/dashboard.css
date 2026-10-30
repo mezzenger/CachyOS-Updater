@@ -95,3 +95,56 @@
           background: @headerbar_bg_color;
           border-top: 1px solid alpha(@borders, 0.80);
         }
+
+/* Active workflow step; badge-only animation keeps redraws small. */
+.workflow-step { padding: 0 5px; }
+.workflow-step label { opacity: 0.62; }
+.workflow-step.step-active label, .workflow-step.step-complete label { opacity: 1; }
+.workflow-step.step-active, .workflow-step.step-complete { color: #57e389; }
+.step-active .step-number, .step-complete .step-number {
+  background: alpha(#57e389, 0.28);
+  box-shadow: 0 0 7px 1px alpha(#57e389, 0.55);
+}
+.step-check.step-pulsing .step-number,
+.step-install.step-pulsing .step-number {
+  animation: workflow-glow 0.8s ease-in-out infinite;
+}
+@keyframes workflow-glow {
+  0%, 100% { box-shadow: 0 0 6px 1px alpha(#57e389, 0.45); }
+  50% { box-shadow: 0 0 11px 2px alpha(#57e389, 0.90); }
+}
+
+/* One completion flash, followed by a shared finale after Alba finishes. */
+.status-flash { animation: completion-status-flash 0.65s ease-out; }
+.status-finishing { animation: completion-status-fade 2s ease-out both; }
+.step-finishing label { animation: completion-step-fade 2s ease-out both; }
+.step-finishing .step-number { animation: completion-number-fade 2s ease-out both; }
+.status-bright, .step-finish-static label { color: #a1ffbd; opacity: 1; }
+.step-finish-static .step-number {
+  background: alpha(#57e389, 0.45);
+  box-shadow: 0 0 11px 2px alpha(#57e389, 0.90);
+}
+@keyframes completion-status-flash {
+  0%, 25% { color: #a1ffbd; text-shadow: 0 0 9px alpha(#57e389, 0.95); }
+  100% { color: @window_fg_color; text-shadow: 0 0 0 transparent; }
+}
+@keyframes completion-status-fade {
+  0%, 15% { color: #a1ffbd; text-shadow: 0 0 9px alpha(#57e389, 0.95); }
+  100% { color: @window_fg_color; text-shadow: 0 0 0 transparent; }
+}
+@keyframes completion-step-fade {
+  0%, 15% { color: #a1ffbd; opacity: 1; text-shadow: 0 0 6px alpha(#57e389, 0.75); }
+  100% { color: @window_fg_color; opacity: 0.62; text-shadow: 0 0 0 transparent; }
+}
+@keyframes completion-number-fade {
+  0%, 15% {
+    color: #a1ffbd; opacity: 1;
+    background: alpha(#57e389, 0.45);
+    box-shadow: 0 0 11px 2px alpha(#57e389, 0.90);
+  }
+  100% {
+    color: @window_fg_color; opacity: 0.62;
+    background: alpha(@window_fg_color, 0.10);
+    box-shadow: 0 0 0 transparent;
+  }
+}

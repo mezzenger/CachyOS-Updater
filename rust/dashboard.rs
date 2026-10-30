@@ -4,6 +4,7 @@ use cachyos_update_center::{
     presentation,
     updates::{self, UpdateResult},
 };
+use std::cell::Cell;
 
 pub struct Card {
     pub status: Widget,
@@ -19,6 +20,7 @@ pub struct Dashboard {
     pub badge: Widget,
     pub summary: Widget,
     pub notice: Widget,
+    pub cancel: Widget,
     pub last_checked: Widget,
     pub retry: Widget,
     pub review_all: Widget,
@@ -27,6 +29,11 @@ pub struct Dashboard {
     pub wave: super::speech_wave::SpeechWave,
     pub cards: Vec<Card>,
     pub controls: Vec<Widget>,
+    steps: Vec<Widget>,
+    workflow_state: Cell<(Option<usize>, bool, [bool; 3])>,
+    layout: Widget,
+    fitted_size: Cell<Option<(i32, i32)>>,
+    completion_style: Cell<(u8, bool)>,
 }
 impl Dashboard {
     pub unsafe fn new(app: Widget, data: Widget) -> (Widget, Self) {
@@ -57,6 +64,8 @@ impl Dashboard {
             }
             let scroller = gtk_scrolled_window_new();
             gtk_scrolled_window_set_policy(scroller, 2, 1);
+            gtk_scrolled_window_set_propagate_natural_height(scroller, 1);
+            gtk_scrolled_window_set_max_content_height(scroller, 620);
             adw_toolbar_view_set_content(toolbar, scroller);
             let clamp = adw_clamp_new();
             adw_clamp_set_maximum_size(clamp, 1040);
@@ -64,6 +73,7 @@ impl Dashboard {
             gtk_scrolled_window_set_child(scroller, clamp);
             let page = gtk_box_new(1, 16);
             margins(page, 20);
+            gtk_widget_set_margin_top(page, 0);
             gtk_widget_set_margin_bottom(page, 24);
             adw_clamp_set_child(clamp, page);
             let hero = gtk_box_new(0, 14);
@@ -76,6 +86,7 @@ impl Dashboard {
             gtk_box_append(hero, well);
             let hero_text = gtk_box_new(1, 4);
             let headline = label("Checking your system");
+            gtk_label_set_wrap(headline, 1);
             css(headline, "title-1");
             let subtitle = label("Pacman and Flatpak");
             css(subtitle, "subtitle");
@@ -116,16 +127,22 @@ impl Dashboard {
             gtk_widget_set_visible(install_all, 0);
             let workflow = gtk_box_new(0, 10);
             css(workflow, "workflow");
+            let mut steps = Vec::new();
             for (number, title) in [("1", "Check"), ("2", "Review (optional)"), ("3", "Install")] {
                 let step = gtk_box_new(0, 6);
+                css(step, "workflow-step");
+                css(
+                    step,
+                    ["step-check", "step-review", "step-install"][steps.len()],
+                );
                 let n = label(number);
                 css(n, "step-number");
                 gtk_label_set_xalign(n, 0.5);
                 let t = label(title);
-                css(t, "dim-label");
                 gtk_box_append(step, n);
                 gtk_box_append(step, t);
                 gtk_box_append(workflow, step);
+                steps.push(step);
             }
             gtk_box_append(page, workflow);
             let wave = super::speech_wave::SpeechWave::new();
@@ -136,6 +153,11 @@ impl Dashboard {
             gtk_label_set_selectable(notice, 1);
             gtk_widget_set_visible(notice, 0);
             gtk_box_append(page, notice);
+            let cancel = button("Cancel update");
+            gtk_widget_set_halign(cancel, 1);
+            gtk_widget_set_visible(cancel, 0);
+            connect(cancel, "clicked", super::cancel_clicked, data);
+            gtk_box_append(page, cancel);
             let section = gtk_box_new(0, 12);
             css(section, "section-header");
             let source_text = gtk_box_new(1, 2);
@@ -253,6 +275,7 @@ impl Dashboard {
                     badge,
                     summary,
                     notice,
+                    cancel,
                     last_checked,
                     retry,
                     review_all,
@@ -269,8 +292,141 @@ impl Dashboard {
                         settings,
                         export,
                     ],
+                    steps,
+                    workflow_state: Cell::new((None, false, [false; 3])),
+                    layout: toolbar,
+                    fitted_size: Cell::new(None),
+                    completion_style: Cell::new((0, false)),
                 },
             )
+        }
+    }
+    /// Fit when content changes; leave manual resizing alone between updates.
+    /// Measure GTK's actual wrapped layout and keep growth within the monitor.
+    pub unsafe fn fit_content(&self, window: Widget) {
+        unsafe {
+            if gtk_widget_get_mapped(window) == 0 || gtk_window_is_maximized(window) != 0 {
+                return;
+            }
+            let mut bounds = Rectangle::default();
+            let surface = gtk_native_get_surface(window);
+            if surface.is_null() {
+                return;
+            }
+            let monitor = gdk_display_get_monitor_at_surface(gdk_display_get_default(), surface);
+            if monitor.is_null() {
+                return;
+            }
+            gdk_monitor_get_geometry(monitor, &mut bounds);
+            let none = std::ptr::null_mut();
+            let mut minimum_width = 0;
+            gtk_widget_measure(self.layout, 0, -1, &mut minimum_width, none, none, none);
+            let baseline = cachyos_update_center::config::WindowState::default();
+            let width = minimum_width
+                .max(baseline.width)
+                .min((bounds.width - 48).max(460));
+            let mut natural_height = 0;
+            gtk_widget_measure(self.layout, 1, width, none, &mut natural_height, none, none);
+            let height = natural_height
+                .max(baseline.height)
+                .min((bounds.height - 80).max(480));
+            if self.fitted_size.replace(Some((width, height))) == Some((width, height)) {
+                return;
+            }
+            let current_width = gtk_widget_get_width(window);
+            let current_height = gtk_widget_get_height(window);
+            if width != current_width || height != current_height {
+                gtk_window_set_default_size(window, width, height);
+            }
+        }
+    }
+    /// Only change CSS when activity or the animation preference changes.
+    /// GTK animates the small number badge; idle/unmapped steps do not pulse.
+    pub unsafe fn workflow(&self, active: Option<usize>, running: bool, completed: [bool; 3]) {
+        unsafe {
+            let mut animate = 0i32;
+            if running {
+                g_object_get(
+                    gtk_settings_get_default(),
+                    c"gtk-enable-animations".as_ptr(),
+                    &mut animate as *mut i32,
+                    std::ptr::null::<std::ffi::c_char>(),
+                );
+            }
+            let pulse = running
+                && animate != 0
+                && active.is_some_and(|i| gtk_widget_get_mapped(self.steps[i]) != 0);
+            if self.workflow_state.replace((active, pulse, completed)) == (active, pulse, completed)
+            {
+                return;
+            }
+            for (i, step) in self.steps.iter().enumerate() {
+                gtk_widget_remove_css_class(*step, c"step-active".as_ptr());
+                gtk_widget_remove_css_class(*step, c"step-pulsing".as_ptr());
+                gtk_widget_remove_css_class(*step, c"step-complete".as_ptr());
+                if completed[i] {
+                    css(*step, "step-complete");
+                }
+                if active == Some(i) {
+                    css(*step, "step-active");
+                    if pulse {
+                        css(*step, "step-pulsing");
+                    }
+                }
+            }
+        }
+    }
+    pub unsafe fn completion_effect(&self, state: u8) {
+        unsafe {
+            let mut animations = 0i32;
+            if state != 0 && gtk_widget_get_mapped(self.subtitle) != 0 {
+                g_object_get(
+                    gtk_settings_get_default(),
+                    c"gtk-enable-animations".as_ptr(),
+                    &mut animations as *mut i32,
+                    std::ptr::null::<std::ffi::c_char>(),
+                );
+            }
+            let animate = animations != 0;
+            if self.completion_style.replace((state, animate)) == (state, animate) {
+                return;
+            }
+            for class in ["status-flash", "status-finishing", "status-bright"] {
+                gtk_widget_remove_css_class(self.subtitle, c(class).as_ptr());
+            }
+            for step in &self.steps {
+                gtk_widget_remove_css_class(*step, c"step-finishing".as_ptr());
+                gtk_widget_remove_css_class(*step, c"step-finish-static".as_ptr());
+            }
+            if state == 1 {
+                css(
+                    self.subtitle,
+                    if animate {
+                        "status-flash"
+                    } else {
+                        "status-bright"
+                    },
+                );
+            } else if state == 2 {
+                css(
+                    self.subtitle,
+                    if animate {
+                        "status-finishing"
+                    } else {
+                        "status-bright"
+                    },
+                );
+                for step in &self.steps {
+                    css(
+                        *step,
+                        if animate {
+                            "step-finishing"
+                        } else {
+                            "step-finish-static"
+                        },
+                    );
+                }
+            }
         }
     }
     pub unsafe fn checking(&self) {

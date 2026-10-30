@@ -5,6 +5,14 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 pub type Widget = *mut c_void;
 pub type Callback = unsafe extern "C" fn();
+#[repr(C)]
+#[derive(Default)]
+pub struct Rectangle {
+    pub x: c_int,
+    pub y: c_int,
+    pub width: c_int,
+    pub height: c_int,
+}
 #[link(name = "gtk-4")]
 unsafe extern "C" {
     pub fn gtk_drawing_area_new() -> Widget;
@@ -32,7 +40,6 @@ unsafe extern "C" {
     pub fn gtk_widget_set_visible(w: Widget, visible: c_int);
     pub fn gtk_widget_set_sensitive(w: Widget, sensitive: c_int);
     pub fn gtk_widget_set_hexpand(w: Widget, expand: c_int);
-    pub fn gtk_widget_set_vexpand(w: Widget, expand: c_int);
     pub fn gtk_widget_set_margin_top(w: Widget, margin: c_int);
     pub fn gtk_widget_set_margin_bottom(w: Widget, margin: c_int);
     pub fn gtk_widget_set_margin_start(w: Widget, margin: c_int);
@@ -72,6 +79,18 @@ unsafe extern "C" {
     pub fn gtk_string_list_new(strings: *const *const c_char) -> Widget;
     pub fn gtk_widget_get_width(w: Widget) -> c_int;
     pub fn gtk_widget_get_height(w: Widget) -> c_int;
+    pub fn gtk_widget_measure(
+        w: Widget,
+        orientation: c_int,
+        for_size: c_int,
+        minimum: *mut c_int,
+        natural: *mut c_int,
+        minimum_baseline: *mut c_int,
+        natural_baseline: *mut c_int,
+    );
+    pub fn gtk_native_get_surface(w: Widget) -> Widget;
+    pub fn gdk_display_get_monitor_at_surface(display: Widget, surface: Widget) -> Widget;
+    pub fn gdk_monitor_get_geometry(monitor: Widget, geometry: *mut Rectangle);
     pub fn gtk_widget_paintable_new(w: Widget) -> Widget;
     pub fn gtk_snapshot_new() -> Widget;
     pub fn gdk_paintable_snapshot(p: Widget, snapshot: Widget, width: f64, height: f64);
@@ -102,10 +121,11 @@ unsafe extern "C" {
     pub fn gtk_text_view_set_wrap_mode(w: Widget, mode: c_int);
     pub fn gtk_text_view_get_buffer(w: Widget) -> Widget;
     pub fn gtk_text_buffer_set_text(w: Widget, text: *const c_char, len: c_int);
-    pub fn gtk_text_buffer_insert_at_cursor(w: Widget, text: *const c_char, len: c_int);
     pub fn gtk_scrolled_window_new() -> Widget;
     pub fn gtk_scrolled_window_set_child(w: Widget, child: Widget);
     pub fn gtk_scrolled_window_set_min_content_height(w: Widget, height: c_int);
+    pub fn gtk_scrolled_window_set_max_content_height(w: Widget, height: c_int);
+    pub fn gtk_scrolled_window_set_propagate_natural_height(w: Widget, propagate: c_int);
     pub fn gtk_widget_get_clipboard(w: Widget) -> Widget;
     pub fn gtk_application_inhibit(
         app: Widget,
@@ -118,10 +138,6 @@ unsafe extern "C" {
 #[link(name = "adwaita-1")]
 unsafe extern "C" {
     pub fn adw_init();
-    pub fn adw_dialog_new() -> Widget;
-    pub fn adw_dialog_set_child(w: Widget, child: Widget);
-    pub fn adw_dialog_set_can_close(w: Widget, can_close: c_int);
-    pub fn adw_header_bar_pack_start(w: Widget, child: Widget);
     pub fn adw_alert_dialog_new(heading: *const c_char, body: *const c_char) -> Widget;
     pub fn adw_alert_dialog_set_heading(w: Widget, heading: *const c_char);
     pub fn adw_alert_dialog_set_body(w: Widget, body: *const c_char);
@@ -245,22 +261,11 @@ pub unsafe fn entry_text(w: Widget) -> String {
 pub unsafe fn text(w: Widget, s: &str) {
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(w), c(s).as_ptr(), -1);
 }
-pub unsafe fn append(w: Widget, s: &str) {
-    gtk_text_buffer_insert_at_cursor(gtk_text_view_get_buffer(w), c(s).as_ptr(), -1);
-}
 pub unsafe fn margins(w: Widget, n: i32) {
     gtk_widget_set_margin_top(w, n);
     gtk_widget_set_margin_bottom(w, n);
     gtk_widget_set_margin_start(w, n);
     gtk_widget_set_margin_end(w, n);
-}
-pub unsafe fn scroll(child: Widget, height: i32) -> Widget {
-    let w = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(w, child);
-    gtk_scrolled_window_set_min_content_height(w, height);
-    gtk_widget_set_vexpand(w, 1);
-    gtk_widget_set_hexpand(w, 1);
-    w
 }
 pub unsafe fn view() -> Widget {
     let w = gtk_text_view_new();

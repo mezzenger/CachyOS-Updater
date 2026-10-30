@@ -6,7 +6,9 @@ installing updates from Pacman and Flatpak.
 ## Features
 
 - Checks Pacman and Flatpak in parallel and shows complete package lists.
-- Installs all updates or selected sources with cancellable, streamed output.
+- Installs all updates or selected sources in the background, with cancellation and logged output.
+- Announces completion with a flash on the top status; after Alba finishes,
+  the three workflow steps and status brighten together and fade back to normal.
 - Supports per-source preferences, stale-result protection, and preflight checks.
 - Uses Polkit for Pacman updates; Flatpak runs as the desktop user.
 - Shows a green speech waveform that follows Piper volume and gently pulses during checks.
@@ -58,7 +60,10 @@ configuration is loaded and are dropped the next time settings are saved.
 - [ACCESSIBILITY.md](ACCESSIBILITY.md): keyboard and accessibility details.
 
 For read-only JSON output, run `cargo run --release --locked --bin cuc-desktop -- --check`.
-The dashboard restores the previous version's overview and source cards.
+The dashboard starts at a compact 476 × 480 and fits its size to the displayed
+content. It grows for additional details and returns to the compact layout when
+they clear; long content remains scrollable within the screen. Maximization is
+remembered, while previous automatic growth does not become the next launch size.
 When enabled in Settings, Piper speaks automatically after checks; the speaker
 button repeats the status. Install icons open a confirmation, while list icons
 show the complete package review with source checkboxes.

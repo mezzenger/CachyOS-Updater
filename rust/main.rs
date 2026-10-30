@@ -1,4 +1,5 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+mod completion;
 mod dashboard;
 mod gtk;
 mod speech_wave;
@@ -27,6 +28,25 @@ enum Phase {
     Reviewing,
     Installing,
 }
+
+fn workflow_activity(
+    phase: &Phase,
+    package_review: bool,
+    followup: bool,
+    voice_busy: bool,
+    previous: Option<usize>,
+) -> (Option<usize>, bool) {
+    let active = match phase {
+        Phase::Checking if followup => Some(2),
+        Phase::Checking => Some(0),
+        Phase::Reviewing => Some(if package_review { 1 } else { 2 }),
+        Phase::Installing => Some(2),
+        Phase::Idle if voice_busy => previous,
+        Phase::Idle => None,
+    };
+    (active, matches!(phase, Phase::Checking | Phase::Installing))
+}
+
 enum Event {
     Checked(Vec<UpdateResult>),
     Output(String),
@@ -45,14 +65,16 @@ struct Settings {
 struct Confirmation {
     window: Widget,
 }
+struct PendingCompletion {
+    successful: bool,
+    speech: String,
+    details: String,
+}
 struct Ui {
     app: Widget,
     window: Widget,
     status: Widget,
     dashboard: Option<dashboard::Dashboard>,
-    progress: Widget,
-    progress_close: Widget,
-    output: Widget,
     cancel_button: Widget,
     confirmation: Option<Confirmation>,
     review: Widget,
@@ -73,6 +95,12 @@ struct Ui {
     timer: u32,
     reboot: bool,
     smoke_stage: u8,
+    quiet_refresh: bool,
+    pending_speech: Option<(Instant, String)>,
+    workflow_hold: Option<usize>,
+    workflow_completed: [bool; 3],
+    pending_completion: Option<PendingCompletion>,
+    completion_effect: completion::Effect,
 }
 impl Ui {
     fn new(smoke: bool) -> Self {
@@ -86,9 +114,6 @@ impl Ui {
             window: null_mut(),
             status: null_mut(),
             dashboard: None,
-            progress: null_mut(),
-            progress_close: null_mut(),
-            output: null_mut(),
             cancel_button: null_mut(),
             confirmation: None,
             review: null_mut(),
@@ -109,6 +134,12 @@ impl Ui {
             timer: 0,
             reboot: false,
             smoke_stage: 0,
+            quiet_refresh: false,
+            pending_speech: None,
+            workflow_hold: None,
+            workflow_completed: [false; 3],
+            pending_completion: None,
+            completion_effect: completion::Effect::Idle,
         }
     }
     unsafe fn notice(&self, text: &str) {
@@ -131,6 +162,10 @@ impl Ui {
         if let Some(e) = &self.config_error {
             self.notice(e);
             return;
+        }
+        if !self.quiet_refresh {
+            self.workflow_completed = [false; 3];
+            self.completion_effect = completion::Effect::Idle;
         }
         self.phase = Phase::Checking;
         self.sensitive(false);
@@ -194,8 +229,14 @@ unsafe extern "C" fn activate(app: Widget, data: Widget) {
     let (win, dashboard) = dashboard::Dashboard::new(app, data);
     ui.window = win;
     ui.status = dashboard.notice;
+    ui.cancel_button = dashboard.cancel;
     ui.dashboard = Some(dashboard);
-    let geometry = WindowState::load();
+    // Begin compact each launch; fit_content measures GTK layout as data changes.
+    // A previous automatic expansion must not become the next launch's size.
+    let geometry = WindowState {
+        maximized: WindowState::load().maximized,
+        ..WindowState::default()
+    };
     gtk_window_set_default_size(win, geometry.width, geometry.height);
     if geometry.maximized {
         gtk_window_maximize(win);
@@ -339,6 +380,8 @@ unsafe fn review(data: Widget, source: Option<&str>) {
     gtk_scrolled_window_set_child(scroll, content);
     adw_alert_dialog_set_extra_child(ui.review, scroll);
     ui.phase = Phase::Reviewing;
+    ui.workflow_completed[1] = true;
+    ui.completion_effect = completion::Effect::Idle;
     ui.sensitive(false);
     let dialog = ui.review;
     review_selection_changed(std::ptr::null_mut(), data);
@@ -429,6 +472,7 @@ unsafe extern "C" fn install_clicked(_: Widget, data: Widget) {
         return;
     }
     ui.phase = Phase::Installing;
+    ui.completion_effect = completion::Effect::Idle;
     ui.cancel = Arc::new(AtomicBool::new(false));
     ui.sensitive(false);
     ui.inhibit = gtk_application_inhibit(
@@ -437,10 +481,10 @@ unsafe extern "C" fn install_clicked(_: Widget, data: Widget) {
         1 | 4,
         c"Installing system updates".as_ptr(),
     );
-    ui.show_progress(data);
+    gtk_widget_set_visible(ui.cancel_button, 1);
+    gtk_widget_set_sensitive(ui.cancel_button, 1);
     ui.persist("installing");
-    ui.notice("Installing updates…");
-    text(ui.output, "");
+    ui.notice("Installing updates in the background… Full output is saved in the log.");
     diagnostics::log(
         &ui.config,
         &format!("Installation approved: {}", ui.targets.join(", ")),
@@ -478,8 +522,8 @@ unsafe extern "C" fn close_requested(_: Widget, data: Widget) -> c_int {
         return 1;
     }
     if !ui.smoke {
-        let mut width = 960;
-        let mut height = 640;
+        let mut width = WindowState::default().width;
+        let mut height = WindowState::default().height;
         gtk_window_get_default_size(ui.window, &mut width, &mut height);
         let _ = WindowState {
             width,
@@ -516,6 +560,7 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
         };
         match event {
             Event::Checked(results) => {
+                ui.workflow_completed[0] = true;
                 ui.results = results;
                 ui.phase = Phase::Idle;
                 ui.sensitive(true);
@@ -524,14 +569,29 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
                     d.render(&ui.results, ui.reboot, ui.config.voice_enabled);
                 }
                 ui.notice("");
-                if !ui.smoke {
+                if let Some(completed) = ui.pending_completion.take() {
+                    let current = ui.results.iter().all(|r| {
+                        !r.enabled
+                            || (r.available_on_system && r.error.is_none() && r.items.is_empty())
+                    });
+                    if completed.successful && current {
+                        ui.completion_effect = completion::Effect::Announcing(Instant::now());
+                    } else if !completed.successful {
+                        ui.notice(&completed.details);
+                    }
+                    // First draw the truthful final status, then let Alba speak.
+                    ui.pending_speech = Some((Instant::now(), completed.speech));
+                } else if !ui.smoke && !ui.quiet_refresh {
                     voice::speak(
                         ui.config.clone(),
                         presentation::speech(&ui.results, &ui.config, ui.reboot),
                     );
                 }
                 diagnostics::log(&ui.config, &status);
-                ui.notify("Update check complete", &status);
+                if !ui.quiet_refresh {
+                    ui.notify("Update check complete", &status);
+                }
+                ui.quiet_refresh = false;
             }
             Event::Output(s) => {
                 let lower = s.to_lowercase();
@@ -542,7 +602,8 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
                 {
                     ui.reboot = true;
                 }
-                append(ui.output, &s);
+                // Full command output remains in the rotating log.
+                // Keep the dashboard responsive and free of terminal output.
             }
             Event::Installed(result) => {
                 if ui.inhibit != 0 {
@@ -551,11 +612,10 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
                 }
                 ui.phase = Phase::Idle;
                 ui.sensitive(true);
-                gtk_widget_set_sensitive(ui.progress_close, 1);
-                adw_dialog_set_can_close(ui.progress, 1);
-                let successful = result
-                    .as_ref()
-                    .is_ok_and(|outcomes| outcomes.iter().all(|o| o.status == "succeeded"));
+                let successful = result.as_ref().is_ok_and(|outcomes| {
+                    !outcomes.is_empty() && outcomes.iter().all(|o| o.status == "succeeded")
+                });
+                ui.workflow_completed[2] = successful;
                 let message = match &result {
                     Ok(outcomes) => outcomes
                         .iter()
@@ -564,38 +624,51 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
                         .join("\n"),
                     Err(e) => format!("Installation blocked: {e}"),
                 };
-                append(
-                    ui.output,
-                    &format!(
-                        "\n{message}{}\n",
-                        if ui.reboot {
-                            "\nA reboot is recommended."
-                        } else {
-                            ""
-                        }
-                    ),
-                );
-                ui.notice(&message);
+                let report = presentation::installation_report(&result, ui.reboot);
+                gtk_widget_set_visible(ui.cancel_button, 0);
+                ui.pending_completion = Some(PendingCompletion {
+                    successful,
+                    speech: report.speech,
+                    details: report.body,
+                });
+                ui.notice(if successful {
+                    "Finishing update checks…"
+                } else {
+                    &message
+                });
                 diagnostics::log(&ui.config, &message);
-                ui.persist(if successful { "complete" } else { "failed" });
-                if let Ok(outcomes) = &result {
+                if !ui.smoke {
+                    ui.persist(if successful { "complete" } else { "failed" });
+                }
+                if let Some(outcomes) = result.as_ref().ok().filter(|_| !ui.smoke) {
                     let _ = config::atomic_json(
                         &config::state_dir().join("last-outcomes.json"),
                         outcomes,
                     );
                 }
-                ui.notify(
-                    if successful {
-                        "Updates completed"
-                    } else {
-                        "Update session needs attention"
-                    },
-                    &message,
-                );
+                if !successful {
+                    ui.notify("Update session needs attention", &message);
+                }
                 // Never offer another install based on the pre-transaction snapshot.
-                ui.results.clear();
-                if result.is_ok() {
+                if !ui.smoke {
+                    ui.results.clear();
+                }
+                ui.sensitive(false);
+                // Refresh stale cards even after a preflight failure. Do not let
+                // this automatic check talk over the installation report.
+                if !ui.smoke {
+                    ui.quiet_refresh = true;
                     ui.refresh(false);
+                } else {
+                    // Offline fixture: drive the same final-check path without subprocesses.
+                    let mut checked = ui.results.clone();
+                    for r in &mut checked {
+                        r.items.clear();
+                        r.error = None;
+                    }
+                    ui.phase = Phase::Checking;
+                    ui.quiet_refresh = true;
+                    let _ = ui.tx.send(Event::Checked(checked));
                 }
             }
             Event::Exported(result) => ui.notice(&match result {
@@ -648,6 +721,7 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
                     .unwrap()
                     .render(&ui.results, false, true);
                 ui.phase = Phase::Idle;
+                ui.workflow_completed[0] = true;
                 ui.sensitive(true);
             }
             1 => {
@@ -717,17 +791,49 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
             9 => {
                 let ui = &mut *(data as *mut Ui);
                 ui.phase = Phase::Installing;
-                ui.show_progress(data);
-                text(
-                    ui.output,
-                    "Pacman — example update output\nPreparing transaction…\nThis is an offline layout preview. No commands are running.",
-                );
+                ui.sensitive(false);
+                gtk_widget_set_visible(ui.cancel_button, 1);
+                gtk_widget_set_sensitive(ui.cancel_button, 1);
+                ui.notice("Installing updates in the background… Full output is saved in the log.");
+                assert_eq!(gtk_widget_get_visible(ui.cancel_button), 1);
             }
             10 => {
                 save((*(data as *mut Ui)).window, "progress.png");
                 let ui = &mut *(data as *mut Ui);
-                ui.phase = Phase::Idle;
-                adw_dialog_set_can_close(ui.progress, 1);
+                let _ = ui.tx.send(Event::Installed(Ok(vec![Outcome {
+                    source: "pacman".into(),
+                    status: "succeeded".into(),
+                    message: "pacman: succeeded (exit Some(0))".into(),
+                    exit_code: Some(0),
+                }])));
+            }
+            11 => {
+                save(ui.window, "completion-status-flash.png");
+                assert!(ui.phase == Phase::Idle);
+                assert_eq!(gtk_widget_get_visible(ui.cancel_button), 0);
+                assert_eq!(ui.workflow_completed, [true, true, true]);
+            }
+            12 => {}
+            13 => {
+                save(ui.window, "completion-all-bright.png");
+            }
+            14 => {
+                save(ui.window, "completion-fading.png");
+            }
+            15..=17 => {}
+            18 => {
+                save(ui.window, "completion-normal.png");
+                assert_eq!(ui.workflow_completed, [false; 3]);
+                assert_eq!(ui.completion_effect, completion::Effect::Idle);
+                ui.phase = Phase::Installing;
+                let _ = ui.tx.send(Event::Installed(Err(
+                    "Pacman database is locked. No updates started.".into(),
+                )));
+            }
+            19 => {
+                save(ui.window, "completion-blocked-inline.png");
+                assert!(ui.phase == Phase::Idle);
+                assert_eq!(ui.completion_effect, completion::Effect::Idle);
                 g_application_quit(app);
             }
             _ => {
@@ -735,13 +841,47 @@ unsafe extern "C" fn poll(data: Widget) -> c_int {
             }
         }
     }
+    if ui
+        .pending_speech
+        .as_ref()
+        .is_some_and(|(shown, _)| shown.elapsed().as_millis() >= 150)
+        && (!ui.smoke || ui.smoke_stage >= 13)
+    {
+        if let Some((_, speech)) = ui.pending_speech.take() {
+            if !ui.smoke {
+                voice::speak(ui.config.clone(), speech);
+            }
+        }
+    }
+    ui.completion_effect = ui.completion_effect.advance(
+        Instant::now(),
+        ui.phase != Phase::Idle
+            || ui.pending_speech.is_some()
+            || ui.pending_completion.is_some()
+            || voice::is_busy(),
+    );
+    if matches!(ui.completion_effect, completion::Effect::Fading(_)) {
+        ui.workflow_completed = [false; 3];
+        ui.workflow_hold = None;
+    }
     if let Some(d) = &ui.dashboard {
+        let (active, running) = workflow_activity(
+            &ui.phase,
+            !ui.review.is_null() && gtk_widget_get_mapped(ui.review) != 0,
+            ui.quiet_refresh,
+            ui.pending_speech.is_some() || voice::is_busy(),
+            ui.workflow_hold,
+        );
+        ui.workflow_hold = active;
+        d.workflow(active, running, ui.workflow_completed);
+        d.completion_effect(ui.completion_effect.style());
         let speech = if ui.smoke && ui.smoke_stage == 1 {
             Some(0.7) // Offline visual fixture; never synthesize or play audio.
         } else {
             voice::playback_level()
         };
         d.wave.update(ui.phase == Phase::Checking, speech);
+        d.fit_content(ui.window);
     }
 
     1
@@ -801,10 +941,6 @@ fn main() {
         if let Some(c) = &ui.confirmation {
             adw_dialog_force_close(c.window);
             g_object_unref(c.window);
-        }
-        if !ui.progress.is_null() {
-            adw_dialog_force_close(ui.progress);
-            g_object_unref(ui.progress);
         }
         if let Some(s) = &ui.settings {
             adw_dialog_force_close(s.window);
@@ -893,44 +1029,11 @@ unsafe fn confirm(data: Widget, source: Option<&str>) {
     );
     adw_alert_dialog_set_body(dialog,c(&format!("Eligible updates from {} will be installed. You can continue without opening the optional package review.",ui.targets.iter().map(|s|presentation::name(s)).collect::<Vec<_>>().join(", "))).as_ptr());
     ui.phase = Phase::Reviewing;
+    ui.completion_effect = completion::Effect::Idle;
     ui.sensitive(false);
     adw_dialog_present(dialog, ui.window);
 }
 
-impl Ui {
-    unsafe fn show_progress(&mut self, data: Widget) {
-        if self.progress.is_null() {
-            self.progress = adw_dialog_new();
-            g_object_ref_sink(self.progress);
-            adw_dialog_set_title(self.progress, c"Installing updates".as_ptr());
-            adw_dialog_set_content_width(self.progress, 760);
-            adw_dialog_set_content_height(self.progress, 480);
-            let toolbar = adw_toolbar_view_new();
-            adw_dialog_set_child(self.progress, toolbar);
-            let header = adw_header_bar_new();
-            adw_toolbar_view_add_top_bar(toolbar, header);
-            self.cancel_button = button("Cancel update");
-            connect(self.cancel_button, "clicked", cancel_clicked, data);
-            adw_header_bar_pack_start(header, self.cancel_button);
-            self.progress_close = button("Close");
-            connect(self.progress_close, "clicked", progress_close_clicked, data);
-            adw_header_bar_pack_end(header, self.progress_close);
-            self.output = view();
-            margins(self.output, 12);
-            adw_toolbar_view_set_content(toolbar, scroll(self.output, 300));
-        }
-        gtk_widget_set_sensitive(self.cancel_button, 1);
-        gtk_widget_set_sensitive(self.progress_close, 0);
-        adw_dialog_set_can_close(self.progress, 0);
-        adw_dialog_present(self.progress, self.window);
-    }
-}
-unsafe extern "C" fn progress_close_clicked(_: Widget, data: Widget) {
-    let ui = &*(data as *mut Ui);
-    if ui.phase != Phase::Installing {
-        adw_dialog_close(ui.progress);
-    }
-}
 unsafe extern "C" fn about_clicked(_: Widget, data: Widget) {
     let ui = &*(data as *mut Ui);
     let dialog = adw_about_dialog_new();
@@ -1229,5 +1332,48 @@ unsafe extern "C" fn save_settings(_: Widget, data: Widget) {
             row_title(s.error, &e);
             gtk_widget_set_visible(s.error, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+
+    #[test]
+    fn install_highlight_lasts_through_refresh_and_speech() {
+        let (step, pulse) = workflow_activity(&Phase::Installing, false, false, false, None);
+        assert_eq!((step, pulse), (Some(2), true));
+        let (step, pulse) = workflow_activity(&Phase::Checking, false, true, true, step);
+        assert_eq!((step, pulse), (Some(2), true));
+        let (step, pulse) = workflow_activity(&Phase::Idle, false, false, true, step);
+        assert_eq!((step, pulse), (Some(2), false));
+        assert_eq!(
+            workflow_activity(&Phase::Idle, false, false, false, step),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn check_review_and_confirmation_follow_their_own_activity() {
+        assert_eq!(
+            workflow_activity(&Phase::Checking, false, false, false, None),
+            (Some(0), true)
+        );
+        assert_eq!(
+            workflow_activity(&Phase::Idle, false, false, true, Some(0)),
+            (Some(0), false)
+        );
+        assert_eq!(
+            workflow_activity(&Phase::Reviewing, true, false, false, None),
+            (Some(1), false)
+        );
+        assert_eq!(
+            workflow_activity(&Phase::Reviewing, false, false, false, None),
+            (Some(2), false)
+        );
+        assert_eq!(
+            workflow_activity(&Phase::Idle, false, false, false, Some(1)),
+            (None, false)
+        );
     }
 }
