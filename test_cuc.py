@@ -27,10 +27,16 @@ class ConfigTests(unittest.TestCase):
     def test_application_version_uses_semantic_versioning(self) -> None:
         self.assertRegex(cuc.__version__, r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
+    def test_all_current_status_keeps_the_grumpy_success_message(self) -> None:
+        self.assertEqual(
+            cuc.ALL_CURRENT_STATUS,
+            "Annoyingly current",
+        )
+
     def test_missing_config_uses_defaults_without_creating_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
-            self.assertEqual(cuc.Config.load(path).aur_helper, "auto")
+            self.assertEqual(cuc.Config.load(path).enabled_sources, {"pacman": True, "flatpak": True})
             self.assertFalse(path.exists())
 
     def test_invalid_config_is_preserved(self) -> None:
@@ -65,11 +71,11 @@ class ConfigTests(unittest.TestCase):
             config.save(path)
             self.assertTrue(cuc.Config.load(path).voice_enabled)
 
-    def test_config_validates_boolean_timeout_and_aur_helper(self) -> None:
+    def test_config_validates_boolean_and_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(
-                json.dumps({"voice_enabled": "false", "command_timeout": 0, "aur_helper": "invalid"}),
+                json.dumps({"voice_enabled": "false", "command_timeout": 0}),
                 encoding="utf-8",
             )
             with self.assertRaises(cuc.ConfigError):
@@ -83,15 +89,9 @@ class ConfigTests(unittest.TestCase):
                 max_result_age_minutes=5,
                 minimum_free_space_mb=2048,
                 notifications_enabled=False,
-                advisory_feed_url="https://example.com/advisory.json",
-                advisory_signature_url="https://example.com/advisory.json.sig",
-                advisory_public_key_file="/etc/cuc/advisory-key.pem",
-                advisory_refresh_hours=12,
                 enabled_sources={
                     "pacman": True,
-                    "aur": False,
                     "flatpak": True,
-                    "snap": False,
                 },
             )
             expected.save(path)
@@ -109,41 +109,26 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(cuc.ConfigError):
                 cuc.Config.load(path)
 
-    def test_signed_advisory_settings_require_a_complete_https_configuration(self) -> None:
+    def test_legacy_sources_and_aur_settings_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(
-                json.dumps({"advisory_feed_url": "https://example.com/advisory.json"}),
+                json.dumps({
+                    "aur_helper": "yay",
+                    "advisory_feed_url": "https://example.com/advisory.json",
+                    "enabled_sources": {
+                        "pacman": True,
+                        "aur": True,
+                        "flatpak": False,
+                        "snap": True,
+                    },
+                }),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(cuc.ConfigError, "require the feed URL"):
-                cuc.Config.load(path)
-
-            path.write_text(
-                json.dumps(
-                    {
-                        "advisory_feed_url": "http://example.com/advisory.json",
-                        "advisory_signature_url": "https://example.com/advisory.json.sig",
-                        "advisory_public_key_file": "/etc/cuc/advisory-key.pem",
-                    }
-                ),
-                encoding="utf-8",
+            self.assertEqual(
+                cuc.Config.load(path).enabled_sources,
+                {"pacman": True, "flatpak": False},
             )
-            with self.assertRaisesRegex(cuc.ConfigError, "valid HTTPS URL"):
-                cuc.Config.load(path)
-
-            path.write_text(
-                json.dumps(
-                    {
-                        "advisory_feed_url": "https://example.com/advisory.json",
-                        "advisory_signature_url": "https://example.com/advisory.json.sig",
-                        "advisory_public_key_file": "relative-key.pem",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(cuc.ConfigError, "absolute path"):
-                cuc.Config.load(path)
 
 
 class WindowStateTests(unittest.TestCase):
@@ -235,6 +220,22 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(state.is_healthy())
         self.assertIn("incomplete", cuc.compose_summary_speech(state, cuc.Config()).lower())
 
+    def test_all_current_speech_includes_reboot_recommendation(self) -> None:
+        state = cuc.AppState(
+            {"pacman": cuc.UpdateResult("pacman", "Pacman", "")}
+        )
+
+        speech = cuc.compose_summary_speech(
+            state,
+            cuc.Config(),
+            reboot_recommended=True,
+        )
+
+        self.assertEqual(
+            speech,
+            "Cozmik.. Your system is up to date. A reboot is recommended.",
+        )
+
     def test_voice_skips_unwritable_preview_directory(self) -> None:
         config = cuc.Config(voice_enabled=True, preview_dir="/read-only-preview")
         with patch.object(cuc.Path, "is_file", return_value=True), \
@@ -266,11 +267,6 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(readiness.ready)
         self.assertIn("writable", readiness.message)
 
-    def test_configured_aur_helper_is_preferred(self) -> None:
-        config = cuc.Config(aur_helper="paru")
-        with patch("cuc_backend.command_exists", side_effect=lambda command: command == "paru"):
-            self.assertEqual(cuc.find_aur_helper(config), "paru")
-
     def test_pacman_check_uses_isolated_database(self) -> None:
         captured_environment = {}
 
@@ -285,64 +281,39 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("CHECKUPDATES_DB", captured_environment)
         self.assertFalse(Path(captured_environment["CHECKUPDATES_DB"]).exists())
 
-    def test_snap_parser_keeps_packages_whose_names_start_with_snap(self) -> None:
-        output = (FIXTURE_DIR / "snap_updates.txt").read_text(encoding="utf-8")
-        items = cuc.parse_snap_updates(output)
-        self.assertEqual(len(items), 2)
-        self.assertTrue(items[0].startswith("snap-store"))
-
     def test_provider_output_fixtures(self) -> None:
         pacman = cuc.parse_update_lines((FIXTURE_DIR / "pacman_updates.txt").read_text(encoding="utf-8"))
-        aur = cuc.parse_update_lines((FIXTURE_DIR / "aur_updates.txt").read_text(encoding="utf-8"))
         flatpak = cuc.parse_update_lines(
             (FIXTURE_DIR / "flatpak_updates.txt").read_text(encoding="utf-8"),
             preserve_spacing=True,
         )
         self.assertEqual(len(pacman), 2)
-        self.assertEqual(cuc.aur_package_name(aur[0]), "google-chrome")
         self.assertEqual(len(flatpak), 2)
 
-    def test_aur_security_blocks_confirmed_and_orphaned_packages(self) -> None:
-        advisory = {
-            "incident_active": True,
-            "affected_packages": [{"name": "gnome-randr-rust"}],
-        }
-        metadata = {
-            "gnome-randr-rust": {"Maintainer": "restored-maintainer"},
-            "orphan-example": {"Maintainer": None},
-        }
-        report = cuc.evaluate_aur_security(
-            ["gnome-randr-rust", "orphan-example"],
-            metadata,
-            advisory,
+    def test_complete_update_list_is_not_truncated(self) -> None:
+        items = [f"package-{index} 1.0 -> 2.0" for index in range(250)]
+        result = cuc.UpdateResult(
+            "pacman",
+            "Pacman",
+            "",
+            available=True,
+            count=len(items),
+            items=items,
         )
-        self.assertFalse(report.install_allowed())
-        self.assertEqual(report.status(), "blocked")
-        self.assertEqual(report.compromised, ["gnome-randr-rust"])
-        self.assertEqual(report.orphaned, ["orphan-example"])
-
-    def test_aur_security_fails_closed_when_metadata_is_unavailable(self) -> None:
-        report = cuc.evaluate_aur_security(
-            ["example"],
-            {},
-            {"incident_active": True, "affected_packages": []},
-            error="network unavailable",
-        )
-        self.assertFalse(report.install_allowed())
-        self.assertIn("could not be verified", " ".join(report.warnings()))
+        formatted = cuc.format_update_list([result])
+        self.assertIn("Pacman — 250 updates", formatted)
+        self.assertIn(items[0], formatted)
+        self.assertIn(items[-1], formatted)
+        self.assertEqual(sum(item in formatted for item in items), len(items))
 
     def test_update_command_builder_is_frontend_independent(self) -> None:
-        config = cuc.Config(aur_helper="paru")
-        with patch("cuc_backend.command_exists", side_effect=lambda command: command == "paru"):
-            commands = cuc.build_update_commands(
-                ["pacman", "aur", "flatpak", "snap"],
-                config,
-                noninteractive=True,
-            )
+        commands = cuc.build_update_commands(
+            ["pacman", "flatpak"],
+            cuc.Config(),
+            noninteractive=True,
+        )
         self.assertEqual(commands[0], ["sudo", "-n", "pacman", "-Syu", "--noconfirm"])
-        self.assertEqual(commands[1][0:3], ["paru", "-Sua", "--noconfirm"])
-        self.assertEqual(commands[2], ["flatpak", "update", "-y"])
-        self.assertEqual(commands[3], ["sudo", "-n", "snap", "refresh"])
+        self.assertEqual(commands[1], ["flatpak", "update", "-y"])
 
 
 class UpdateSessionTests(unittest.TestCase):
@@ -363,13 +334,17 @@ class UpdateSessionTests(unittest.TestCase):
     def test_install_summary_reports_partial_outcomes(self) -> None:
         summary = cuc.InstallSummary()
         summary.add("pacman", "succeeded", "done", 0)
-        summary.add("aur", "failed", "bad package", 1)
-        summary.add("flatpak", "skipped", "after failure")
+        summary.add("flatpak", "failed", "bad package", 1)
 
         self.assertFalse(summary.successful())
         self.assertIn("Succeeded: Pacman", summary.message())
-        self.assertIn("Failed: AUR", summary.message())
-        self.assertIn("Skipped: Flatpak", summary.message())
+        self.assertIn("Failed: Flatpak", summary.message())
+
+    def test_update_output_detects_reboot_recommendations(self) -> None:
+        self.assertTrue(cuc.output_recommends_reboot("Reboot recommended"))
+        self.assertTrue(cuc.output_recommends_reboot("A reboot is recommended.\n"))
+        self.assertFalse(cuc.output_recommends_reboot("No reboot recommended."))
+        self.assertFalse(cuc.output_recommends_reboot("Update completed successfully."))
 
 
 class UpdateFlowTests(unittest.TestCase):
@@ -411,20 +386,18 @@ class UpdateFlowTests(unittest.TestCase):
         config = cuc.Config(
             enabled_sources={
                 "pacman": True,
-                "aur": True,
-                "flatpak": True,
-                "snap": False,
+                "flatpak": False,
             }
         )
-        with patch("cuc_backend.check_snap_updates") as snap_check:
+        with patch.object(cuc.PROVIDERS["flatpak"], "check") as flatpak_check:
             state = cuc.check_all_parallel(
                 config,
                 show_progress=False,
-                sources=["snap"],
+                sources=["flatpak"],
             )
 
-        snap_check.assert_not_called()
-        self.assertFalse(state.results["snap"].enabled)
+        flatpak_check.assert_not_called()
+        self.assertFalse(state.results["flatpak"].enabled)
 
     def test_preflight_detects_stale_network_lock_disk_and_process_conflicts(self) -> None:
         old = (datetime.now() - timedelta(hours=1)).isoformat()
@@ -474,28 +447,27 @@ class UpdateFlowTests(unittest.TestCase):
         state = cuc.AppState(
             {
                 "pacman": cuc.UpdateResult("pacman", "Pacman", "", available=True, count=1),
-                "aur": cuc.UpdateResult("aur", "AUR", "", available=True, count=1),
-                "snap": cuc.UpdateResult("snap", "Snap", "", available=True, count=1),
+                "flatpak": cuc.UpdateResult("flatpak", "Flatpak", "", available=True, count=1),
             }
         )
-        running_snap = [cuc.RunningPackageManager("snap", 2468)]
-        with patch("cuc_backend._running_package_managers", return_value=running_snap):
-            system_issues = cuc.check_update_preflight(["pacman", "aur"], state, cuc.Config())
-            snap_issues = cuc.check_update_preflight(["snap"], state, cuc.Config())
+        running_flatpak = [cuc.RunningPackageManager("flatpak", 2468)]
+        with patch("cuc_backend._running_package_managers", return_value=running_flatpak):
+            system_issues = cuc.check_update_preflight(["pacman"], state, cuc.Config())
+            flatpak_issues = cuc.check_update_preflight(["flatpak"], state, cuc.Config())
 
         self.assertNotIn("package-manager-running", {issue.code for issue in system_issues})
-        snap_conflict = next(
-            issue for issue in snap_issues if issue.code == "package-manager-running"
+        flatpak_conflict = next(
+            issue for issue in flatpak_issues if issue.code == "package-manager-running"
         )
-        self.assertIn("snap (PID 2468)", snap_conflict.message)
+        self.assertIn("flatpak (PID 2468)", flatpak_conflict.message)
 
     def test_running_package_manager_scan_ignores_zombies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             proc_root = Path(directory)
             active = proc_root / "1111"
             active.mkdir()
-            (active / "comm").write_text("paru\n", encoding="utf-8")
-            (active / "status").write_text("Name:\tparu\nState:\tS (sleeping)\n", encoding="utf-8")
+            (active / "comm").write_text("flatpak\n", encoding="utf-8")
+            (active / "status").write_text("Name:\tflatpak\nState:\tS (sleeping)\n", encoding="utf-8")
             zombie = proc_root / "2222"
             zombie.mkdir()
             (zombie / "comm").write_text("snap\n", encoding="utf-8")
@@ -503,10 +475,10 @@ class UpdateFlowTests(unittest.TestCase):
 
             self.assertEqual(
                 cuc._running_package_managers(proc_root),
-                [cuc.RunningPackageManager("paru", 1111)],
+                [cuc.RunningPackageManager("flatpak", 1111)],
             )
 
-    def test_shared_executor_skips_aur_after_pacman_failure_but_continues_independent_sources(self) -> None:
+    def test_shared_executor_continues_independent_source_after_failure(self) -> None:
         calls = []
 
         def run(source, _command):
@@ -518,15 +490,13 @@ class UpdateFlowTests(unittest.TestCase):
         outcomes = UpdateExecutor().execute(
             [
                 ("pacman", ["pacman"]),
-                ("aur", ["paru"]),
                 ("flatpak", ["flatpak"]),
-                ("snap", ["snap"]),
             ],
             run,
         )
 
-        self.assertEqual(calls, ["pacman", "flatpak", "snap"])
-        self.assertEqual([outcome.status for outcome in outcomes], ["failed", "skipped", "succeeded", "succeeded"])
+        self.assertEqual(calls, ["pacman", "flatpak"])
+        self.assertEqual([outcome.status for outcome in outcomes], ["failed", "succeeded"])
 
     def test_shared_executor_stops_everything_after_cancellation(self) -> None:
         outcomes = UpdateExecutor().execute(
@@ -540,7 +510,7 @@ class AdvisoryUpdateTests(unittest.TestCase):
         return {
             "schema_version": 1,
             "updated_at": updated_at,
-            "expires_at": "2026-09-06",
+            "expires_at": "2027-09-06",
             "incident_active": True,
             "advisory_url": "https://example.com/advisory",
             "affected_packages": [
@@ -741,6 +711,69 @@ class PrivilegedHelperTests(unittest.TestCase):
 
 
 class DesktopSecurityRegressionTests(unittest.TestCase):
+    def test_desktop_uses_shared_all_current_status(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        self.assertIn("self.headline.set_text(cuc.ALL_CURRENT_STATUS)", source)
+        self.assertIn('"Your system is up to date.{reboot_message}{suffix}"', source)
+        self.assertIn('" A reboot is recommended."', source)
+        self.assertNotIn('self.set_overview_badge("All current"', source)
+        self.assertIn("self.overview_badge.set_visible(False)", source)
+
+    def test_update_cards_keep_compact_actions_and_details_in_review(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        self.assertNotIn("self.items = Gtk.Label", source)
+        self.assertNotIn("self.more_packages", source)
+        self.assertIn("grid = Gtk.Grid()", source)
+        self.assertNotIn("grid = Gtk.FlowBox()", source)
+        self.assertIn("grid.attach(card, index % 2, index // 2, 1, 1)", source)
+        self.assertIn(
+            'self.review_button = Gtk.Button.new_from_icon_name("view-list-symbolic")',
+            source,
+        )
+        self.assertIn(
+            'self.install_all_button = Gtk.Button.new_from_icon_name('
+            '"system-software-install-symbolic")',
+            source,
+        )
+        self.assertIn("packages = Gtk.TextView()", source)
+        self.assertIn('copy_button = Gtk.Button(label="Copy complete list")', source)
+        self.assertIn("self.get_clipboard().set(GObject.Value(str, package_text))", source)
+        self.assertIn("package_text = cuc.format_update_list(results)", source)
+        self.assertIn('"\\n".join(result.items) or "Package details unavailable"', source)
+
+    def test_desktop_source_logo_assets_are_packaged_and_used(self) -> None:
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        installer = Path("scripts/install-user.sh").read_text(encoding="utf-8")
+        package = Path("PKGBUILD").read_text(encoding="utf-8")
+        for name in ("pacman", "flatpak"):
+            logo = Path("assets/source-icons") / f"{name}.png"
+            self.assertTrue(logo.is_file())
+            self.assertGreater(logo.stat().st_size, 0)
+            self.assertIn("assets/source-icons", installer)
+            self.assertIn(str(logo), package)
+        self.assertIn("Gtk.Image.new_from_file", source)
+
+    def test_application_icon_is_packaged_for_desktop_installations(self) -> None:
+        icon_name = "io.github.alvin.Cuc"
+        icon = Path("assets") / f"{icon_name}.svg"
+        source = Path("cuc_desktop.py").read_text(encoding="utf-8")
+        launcher = Path(f"{icon_name}.desktop").read_text(encoding="utf-8")
+        installer = Path("scripts/install-user.sh").read_text(encoding="utf-8")
+        uninstaller = Path("scripts/uninstall-user.sh").read_text(encoding="utf-8")
+        package = Path("PKGBUILD").read_text(encoding="utf-8")
+
+        self.assertTrue(icon.is_file())
+        self.assertGreater(icon.stat().st_size, 0)
+        self.assertIn(f"Icon={icon_name}", launcher)
+        self.assertIn(str(icon), installer)
+        self.assertIn(str(icon), package)
+        self.assertIn(f"{icon_name}.svg", uninstaller)
+        self.assertIn("gtk-update-icon-cache --force --ignore-theme-index", installer)
+        self.assertIn("update-desktop-database", installer)
+        self.assertIn('APP_ICON_PATH = Path(__file__).resolve().parent / "assets"', source)
+        self.assertIn("Gtk.Image.new_from_file(str(APP_ICON_PATH))", source)
+        self.assertIn("application_icon=APP_ID", source)
+
     def test_desktop_uses_no_password_entry_or_inherited_credential_pipe(self) -> None:
         source = Path("cuc_desktop.py").read_text(encoding="utf-8")
         self.assertNotIn("Gtk.PasswordEntry", source)

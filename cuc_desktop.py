@@ -8,7 +8,6 @@ import json
 import logging
 import signal
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -19,32 +18,25 @@ import gi
 
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 import cuc_backend as cuc  # noqa: E402
 
 
 APP_ID = "io.github.alvin.Cuc"
+APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / f"{APP_ID}.svg"
 PIPER_VOICE_ROOT = Path("/usr/share/piper-voices")
-SOURCE_ORDER = ("pacman", "aur", "flatpak", "snap")
+SOURCE_ORDER = ("pacman", "flatpak")
+SOURCE_ICON_DIR = Path(__file__).resolve().parent / "assets" / "source-icons"
 SOURCE_ICONS = {
     "pacman": "system-software-update-symbolic",
-    "aur": "applications-system-symbolic",
     "flatpak": "package-x-generic-symbolic",
-    "snap": "system-run-symbolic",
+}
+SOURCE_ICON_FILES = {
+    source: SOURCE_ICON_DIR / f"{source}.png"
+    for source in SOURCE_ORDER
 }
 POLKIT_HELPER = Path("/usr/lib/cachyos-update-center/cuc-privileged")
-
-
-def secure_terminal_command(command: list[str]) -> list[str] | None:
-    """Wrap an interactive command without invoking a shell or carrying credentials."""
-    if shutil.which("kgx"):
-        return ["kgx", "--wait", "--", *command]
-    if shutil.which("gnome-terminal"):
-        return ["gnome-terminal", "--wait", "--", *command]
-    if shutil.which("xterm"):
-        return ["xterm", "-T", "CachyOS AUR Update", "-e", *command]
-    return None
 
 
 class SourceCard(Gtk.Box):
@@ -58,7 +50,7 @@ class SourceCard(Gtk.Box):
         self.add_css_class("source-card")
         self.set_hexpand(True)
         self.set_vexpand(False)
-        self.set_size_request(280, -1)
+        self.set_size_request(190, -1)
         self.set_margin_top(3)
         self.set_margin_bottom(3)
         self.set_margin_start(3)
@@ -67,8 +59,13 @@ class SourceCard(Gtk.Box):
         top = Gtk.Box(spacing=10)
         icon_well = Gtk.Box()
         icon_well.add_css_class("source-icon-well")
-        icon = Gtk.Image.new_from_icon_name(SOURCE_ICONS[source])
-        icon.set_pixel_size(22)
+        icon_path = SOURCE_ICON_FILES[source]
+        icon = (
+            Gtk.Image.new_from_file(str(icon_path))
+            if icon_path.is_file()
+            else Gtk.Image.new_from_icon_name(SOURCE_ICONS[source])
+        )
+        icon.set_pixel_size(28)
         icon.add_css_class("source-icon")
         icon_well.append(icon)
         top.append(icon_well)
@@ -97,30 +94,25 @@ class SourceCard(Gtk.Box):
         self.detail.add_css_class("source-detail")
         self.append(self.detail)
 
-        self.items = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        self.items.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        self.items.add_css_class("package-list")
-        self.items.add_css_class("package-preview")
-        self.append(self.items)
-
-        self.all_packages: list[str] = []
-        self.has_updates = False
-        self.more_packages = Gtk.LinkButton.new_with_label("about:blank", "")
-        self.more_packages.set_halign(Gtk.Align.START)
-        self.more_packages.add_css_class("more-link")
-        self.more_packages.set_visible(False)
-        self.more_packages.connect("activate-link", self.show_all_packages)
-        self.append(self.more_packages)
-
         self.footer = Gtk.Box(spacing=8)
         self.footer.set_halign(Gtk.Align.END)
-        self.review_button = Gtk.Button(label="Review")
-        self.review_button.set_icon_name("view-list-symbolic")
+        self.review_button = Gtk.Button.new_from_icon_name("view-list-symbolic")
+        self.review_button.add_css_class("circular")
+        self.review_button.set_tooltip_text("Review packages")
+        self.review_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Review packages"],
+        )
         self.review_button.connect("clicked", lambda *_: self.on_review(self.source))
         self.footer.append(self.review_button)
-        self.install_button = Gtk.Button(label="Install now")
-        self.install_button.set_icon_name("system-software-install-symbolic")
+        self.install_button = Gtk.Button.new_from_icon_name("system-software-install-symbolic")
+        self.install_button.add_css_class("circular")
         self.install_button.add_css_class("primary-action")
+        self.install_button.set_tooltip_text("Install this source")
+        self.install_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Install this source"],
+        )
         self.install_button.connect("clicked", lambda *_: self.on_install(self.source))
         self.footer.append(self.install_button)
         self.append(self.footer)
@@ -128,18 +120,13 @@ class SourceCard(Gtk.Box):
         self.show_checking()
 
     def show_checking(self) -> None:
-        self.title.set_text(self.source.capitalize() if self.source != "aur" else "AUR")
+        self.title.set_text(self.source.capitalize())
         self.status.set_text("Checking…")
         self.status.remove_css_class("status-ok")
         self.status.remove_css_class("status-warn")
         self.status.remove_css_class("status-error")
         self.count.set_text("—")
         self.detail.set_text("Contacting this update source.")
-        self.items.set_text("")
-        self.items.set_visible(False)
-        self.all_packages = []
-        self.has_updates = False
-        self.more_packages.set_visible(False)
         self.footer.set_visible(False)
         self.review_button.set_sensitive(False)
         self.install_button.set_sensitive(False)
@@ -149,11 +136,6 @@ class SourceCard(Gtk.Box):
         self.status.remove_css_class("status-ok")
         self.status.remove_css_class("status-warn")
         self.status.remove_css_class("status-error")
-        self.items.set_text("")
-        self.items.set_visible(False)
-        self.all_packages = []
-        self.has_updates = False
-        self.more_packages.set_visible(False)
         self.footer.set_visible(False)
 
         if not result.enabled:
@@ -195,18 +177,14 @@ class SourceCard(Gtk.Box):
             if result.security_warnings:
                 self.detail.set_text(result.security_warnings[0])
             else:
-                self.detail.set_text("Review the items below, then install when ready.")
-            preview = result.items[:5]
-            self.all_packages = result.items
-            self.has_updates = True
-            if result.count > len(preview):
-                remaining = result.count - len(preview)
-                self.more_packages.set_label(f"Show {remaining} more")
-                self.more_packages.set_visible(True)
-            self.items.set_text("\n".join(preview))
-            self.items.set_visible(True)
+                self.detail.set_text("Review package details, or install when ready.")
             self.footer.set_visible(True)
-            self.review_button.set_label("Review safety" if not result.install_allowed else "Review")
+            review_label = "Review safety details" if not result.install_allowed else "Review packages"
+            self.review_button.set_tooltip_text(review_label)
+            self.review_button.update_property(
+                [Gtk.AccessibleProperty.LABEL],
+                [review_label],
+            )
             self.review_button.set_sensitive(True)
             self.install_button.set_sensitive(result.install_allowed)
             return
@@ -217,41 +195,6 @@ class SourceCard(Gtk.Box):
         self.detail.set_text("Nothing pending from this source.")
         self.review_button.set_sensitive(False)
         self.install_button.set_sensitive(False)
-
-    def show_all_packages(self, _button: Gtk.LinkButton) -> bool:
-        root = self.get_root()
-        dialog = Adw.AlertDialog(
-            heading=f"{self.source.upper() if self.source == 'aur' else self.source.capitalize()} updates",
-            body=f"{len(self.all_packages)} packages available",
-        )
-        dialog.add_response("close", "Close")
-        dialog.add_response("review", "Review selection")
-        dialog.set_response_appearance("review", Adw.ResponseAppearance.SUGGESTED)
-        result_can_install = bool(self.has_updates)
-        dialog.set_response_enabled("review", result_can_install)
-        dialog.set_default_response("review")
-        dialog.set_close_response("close")
-
-        def respond(_current: Adw.AlertDialog, response: str) -> None:
-            if response == "review" and self.has_updates:
-                self.on_review(self.source)
-
-        dialog.connect("response", respond)
-
-        packages = Gtk.TextView()
-        packages.set_editable(False)
-        packages.set_cursor_visible(False)
-        packages.set_monospace(True)
-        packages.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        packages.get_buffer().set_text("\n".join(self.all_packages))
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_hexpand(True)
-        scroll.set_vexpand(True)
-        scroll.set_child(packages)
-        scroll.set_size_request(600, 420)
-        dialog.set_extra_child(scroll)
-        dialog.present(root if isinstance(root, Gtk.Widget) else None)
-        return True
 
 
 class SettingsWindow(Adw.PreferencesDialog):
@@ -279,15 +222,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         self.spoken_name = Adw.EntryRow(title="Spoken name")
         self.spoken_name.set_text(config.spoken_name)
         general.add(self.spoken_name)
-
-        self.aur_helpers = ("auto", *cuc.SUPPORTED_AUR_HELPERS)
-        self.aur_helper = Adw.ComboRow(
-            title="AUR helper",
-            subtitle="Choose the helper used for AUR checks and installs.",
-            model=Gtk.StringList.new(self.aur_helpers),
-        )
-        self.aur_helper.set_selected(self.aur_helpers.index(config.aur_helper))
-        general.add(self.aur_helper)
 
         self.timeout = Adw.SpinRow.new_with_range(1, 900, 1)
         self.timeout.set_title("Command timeout")
@@ -386,55 +320,6 @@ class SettingsWindow(Adw.PreferencesDialog):
         self.log_file.set_text(config.log_file)
         storage.add(self.log_file)
 
-        advisories = Adw.PreferencesGroup(
-            title="AUR security advisories",
-            description=(
-                "Optional automatic security data from a trusted publisher. "
-                "Configure all three signed-feed fields together, or leave all three blank."
-            ),
-        )
-        page.add(advisories)
-        self.advisory_cache_file = Adw.EntryRow(title="Authenticated advisory cache")
-        self.advisory_cache_file.set_text(config.advisory_cache_file)
-        self.advisory_cache_file.set_tooltip_text(
-            "Local cache used for verified AUR security advisory data."
-        )
-        advisories.add(self.advisory_cache_file)
-
-        def advisory_entry(title: str, subtitle: str) -> tuple[Adw.ActionRow, Gtk.Entry]:
-            row = Adw.ActionRow(title=title, subtitle=subtitle)
-            entry = Gtk.Entry()
-            entry.set_hexpand(True)
-            entry.set_valign(Gtk.Align.CENTER)
-            entry.set_width_chars(34)
-            row.add_suffix(entry)
-            row.set_activatable_widget(entry)
-            return row, entry
-
-        feed_row, self.advisory_feed_url = advisory_entry(
-            "Signed advisory feed URL",
-            "HTTPS address of the advisory JSON from a trusted publisher.",
-        )
-        self.advisory_feed_url.set_text(config.advisory_feed_url)
-        advisories.add(feed_row)
-        signature_row, self.advisory_signature_url = advisory_entry(
-            "Advisory signature URL",
-            "HTTPS address of the detached Ed25519 signature for the feed.",
-        )
-        self.advisory_signature_url.set_text(config.advisory_signature_url)
-        advisories.add(signature_row)
-        key_row, self.advisory_public_key_file = advisory_entry(
-            "Advisory public key file",
-            "Absolute path to the trusted Ed25519 public key used for verification.",
-        )
-        self.advisory_public_key_file.set_text(config.advisory_public_key_file)
-        advisories.add(key_row)
-        self.advisory_refresh_hours = Adw.SpinRow.new_with_range(1, 168, 1)
-        self.advisory_refresh_hours.set_title("Advisory refresh interval")
-        self.advisory_refresh_hours.set_subtitle("Hours between signed advisory refresh attempts.")
-        self.advisory_refresh_hours.set_value(config.advisory_refresh_hours)
-        advisories.add(self.advisory_refresh_hours)
-
         action_group = Adw.PreferencesGroup()
         page.add(action_group)
         save_row = Adw.ActionRow(title="Apply settings")
@@ -489,7 +374,6 @@ class SettingsWindow(Adw.PreferencesDialog):
             log_file=self.current_config.log_file,
             command_timeout=self.current_config.command_timeout,
             spoken_name=self.spoken_name.get_text().strip() or "there",
-            aur_helper=self.current_config.aur_helper,
         )
         self.error_row.set_visible(False)
         cuc.speak_async("Hello. This is your selected update voice.", sample_config)
@@ -502,19 +386,9 @@ class SettingsWindow(Adw.PreferencesDialog):
             return str(Path(value).expanduser()) if "path" in label.lower() or "directory" in label.lower() or "file" in label.lower() else value
 
         try:
-            advisory_settings = cuc.validate_signed_advisory_settings(
-                self.advisory_feed_url.get_text(),
-                self.advisory_signature_url.get_text(),
-                self.advisory_public_key_file.get_text(),
-            )
-            if advisory_settings[2] and not Path(advisory_settings[2]).is_file():
-                raise ValueError(
-                    "The signed advisory public key file does not exist or is not a regular file."
-                )
             config = cuc.Config(
                 voice_enabled=self.voice_enabled.get_active(),
                 spoken_name=required(self.spoken_name, "Spoken name"),
-                aur_helper=self.aur_helpers[self.aur_helper.get_selected()],
                 command_timeout=int(self.timeout.get_value()),
                 installation_timeout=int(self.installation_timeout.get_value()),
                 max_result_age_minutes=int(self.max_result_age.get_value()),
@@ -522,14 +396,6 @@ class SettingsWindow(Adw.PreferencesDialog):
                 piper_model=self.selected_voice_model(),
                 preview_dir=required(self.preview_dir, "Preview cache directory"),
                 log_file=required(self.log_file, "Log file"),
-                advisory_cache_file=required(
-                    self.advisory_cache_file,
-                    "Advisory cache file",
-                ),
-                advisory_feed_url=advisory_settings[0],
-                advisory_signature_url=advisory_settings[1],
-                advisory_public_key_file=advisory_settings[2],
-                advisory_refresh_hours=int(self.advisory_refresh_hours.get_value()),
                 notifications_enabled=self.notifications_enabled.get_active(),
                 enabled_sources={
                     source: row.get_active()
@@ -622,15 +488,19 @@ class UpdateWindow(Adw.ApplicationWindow):
         hero.add_css_class("overview-panel")
         hero_icon_well = Gtk.Box()
         hero_icon_well.add_css_class("overview-icon-well")
-        hero_icon = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
-        hero_icon.set_pixel_size(32)
+        hero_icon = (
+            Gtk.Image.new_from_file(str(APP_ICON_PATH))
+            if APP_ICON_PATH.is_file()
+            else Gtk.Image.new_from_icon_name(APP_ID)
+        )
+        hero_icon.set_pixel_size(48)
         hero_icon.add_css_class("overview-icon")
         hero_icon_well.append(hero_icon)
         hero.append(hero_icon_well)
         hero_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.headline = Gtk.Label(label="Checking your system", xalign=0)
         self.headline.add_css_class("title-1")
-        self.subheadline = Gtk.Label(label="Pacman, AUR, Flatpak, and Snap", xalign=0)
+        self.subheadline = Gtk.Label(label="Pacman and Flatpak", xalign=0)
         self.subheadline.add_css_class("subtitle")
         hero_text.append(self.headline)
         hero_text.append(self.subheadline)
@@ -653,21 +523,29 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.refresh_button.set_valign(Gtk.Align.CENTER)
         self.refresh_button.connect("clicked", lambda *_: self.refresh())
         actions.append(self.refresh_button)
-        self.review_all_button = Gtk.Button(label="Review updates")
-        self.review_all_button.set_icon_name("view-list-symbolic")
+        self.review_all_button = Gtk.Button.new_from_icon_name("view-list-symbolic")
+        self.review_all_button.add_css_class("circular")
         self.review_all_button.set_valign(Gtk.Align.CENTER)
         self.review_all_button.set_sensitive(False)
         self.review_all_button.set_visible(False)
         self.review_all_button.set_tooltip_text("Review all pending packages (Ctrl+U)")
+        self.review_all_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Review all pending packages"],
+        )
         self.review_all_button.connect("clicked", lambda *_: self.confirm_install(None))
         actions.append(self.review_all_button)
-        self.install_all_button = Gtk.Button(label="Update all")
-        self.install_all_button.set_icon_name("system-software-install-symbolic")
+        self.install_all_button = Gtk.Button.new_from_icon_name("system-software-install-symbolic")
+        self.install_all_button.add_css_class("circular")
         self.install_all_button.add_css_class("primary-action")
         self.install_all_button.set_valign(Gtk.Align.CENTER)
         self.install_all_button.set_sensitive(False)
         self.install_all_button.set_visible(False)
         self.install_all_button.set_tooltip_text("Install all eligible updates")
+        self.install_all_button.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Install all eligible updates"],
+        )
         self.install_all_button.connect("clicked", lambda *_: self.confirm_install_now(None))
         actions.append(self.install_all_button)
         hero.append(actions)
@@ -695,17 +573,12 @@ class UpdateWindow(Adw.ApplicationWindow):
         if self.recovery_warning:
             self.show_notice(self.recovery_warning)
 
-        self.security_notice = Gtk.Label(xalign=0, wrap=True)
-        self.security_notice.add_css_class("security-banner")
-        self.security_notice.set_visible(False)
-        page.append(self.security_notice)
-
         source_header = Gtk.Box(spacing=12)
         source_header.add_css_class("section-header")
         source_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         source_title = Gtk.Label(label="Update sources", xalign=0)
         source_title.add_css_class("title-3")
-        self.source_summary = Gtk.Label(label="Checking Pacman, AUR, Flatpak, and Snap", xalign=0)
+        self.source_summary = Gtk.Label(label="Checking Pacman and Flatpak", xalign=0)
         self.source_summary.add_css_class("dim-label")
         source_text.append(source_title)
         source_text.append(self.source_summary)
@@ -719,18 +592,16 @@ class UpdateWindow(Adw.ApplicationWindow):
         source_header.append(self.retry_button)
         page.append(source_header)
 
-        grid = Gtk.FlowBox()
-        grid.set_selection_mode(Gtk.SelectionMode.NONE)
-        grid.set_min_children_per_line(1)
-        grid.set_max_children_per_line(2)
+        grid = Gtk.Grid()
+        grid.set_column_homogeneous(True)
+        grid.set_row_homogeneous(True)
         grid.set_column_spacing(8)
         grid.set_row_spacing(8)
-        grid.set_homogeneous(True)
         grid.set_valign(Gtk.Align.START)
-        for source in SOURCE_ORDER:
+        for index, source in enumerate(SOURCE_ORDER):
             card = SourceCard(source, self.confirm_install, self.confirm_install_now)
             self.cards[source] = card
-            grid.append(card)
+            grid.attach(card, index % 2, index // 2, 1, 1)
         page.append(grid)
 
         footer = Gtk.Box(spacing=8)
@@ -825,12 +696,14 @@ class UpdateWindow(Adw.ApplicationWindow):
         .overview-icon-well {
           min-width: 56px;
           min-height: 56px;
+          background: alpha(#D4AF37, 0.22);
         }
         .source-icon-well {
           min-width: 44px;
           min-height: 44px;
         }
-        .overview-icon, .source-icon { color: @window_fg_color; }
+        .overview-icon { color: #D4AF37; }
+        .source-icon { color: @window_fg_color; }
         .overview-badge, .count-pill, .status-chip {
           border-radius: 999px;
           font-weight: 700;
@@ -879,10 +752,6 @@ class UpdateWindow(Adw.ApplicationWindow):
           background: alpha(@window_fg_color, 0.10);
           font-weight: 700;
         }
-        .package-list {
-          font-family: monospace;
-          font-size: 0.9em;
-        }
         .package-preview {
           padding: 10px 12px;
           border-radius: 12px;
@@ -892,7 +761,6 @@ class UpdateWindow(Adw.ApplicationWindow):
         .status-ok { color: @success_color; }
         .status-warn { color: @warning_color; }
         .status-error { color: @error_color; }
-        .more-link { font-weight: 600; }
         .notice {
           padding: 12px 14px;
           border-radius: 12px;
@@ -959,6 +827,7 @@ class UpdateWindow(Adw.ApplicationWindow):
             self.overview_badge.remove_css_class(css_class)
         self.overview_badge.set_text(text)
         self.overview_badge.add_css_class(style)
+        self.overview_badge.set_visible(True)
 
     def refresh(
         self,
@@ -981,10 +850,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.review_all_button.set_visible(False)
         self.install_all_button.set_sensitive(False)
         self.install_all_button.set_visible(False)
-        self.review_all_button.set_label("Review updates")
-        self.install_all_button.set_label("Update all")
         self.notice.set_visible(False)
-        self.security_notice.set_visible(False)
         if self.config_warning:
             self.show_notice(self.config_warning)
         source_names = sources or list(SOURCE_ORDER)
@@ -1057,23 +923,7 @@ class UpdateWindow(Adw.ApplicationWindow):
         self.review_all_button.set_visible(bool(total))
         self.install_all_button.set_sensitive(bool(targets))
         self.install_all_button.set_visible(bool(targets))
-        if installable_total:
-            self.review_all_button.set_label(
-                f"Review {total} update{'s' if total != 1 else ''}"
-            )
-            self.install_all_button.set_label("Update all")
         self.last_checked.set_text(f"Last checked {datetime.now().strftime('%H:%M')}")
-        security_warnings = [
-            warning
-            for result in state.results.values()
-            for warning in result.security_warnings
-        ]
-        if security_warnings:
-            self.security_notice.set_text(
-                "AUR safety review\n" + "\n".join(f"• {warning}" for warning in security_warnings)
-            )
-            self.security_notice.set_visible(True)
-
         if failures:
             self.headline.set_text("Update check needs attention")
             self.subheadline.set_text(f"Could not check: {', '.join(result.display_name for result in failures)}")
@@ -1111,10 +961,18 @@ class UpdateWindow(Adw.ApplicationWindow):
                 )
                 self.send_notification("Updates blocked", self.source_summary.get_text())
         else:
-            self.headline.set_text("Everything is current")
+            self.headline.set_text(cuc.ALL_CURRENT_STATUS)
             suffix = f" Unavailable: {', '.join(result.display_name for result in unavailable)}." if unavailable else ""
-            self.subheadline.set_text(f"All installed sources are up to date.{suffix}")
-            self.set_overview_badge("All current", "overview-current")
+            reboot_message = (
+                " A reboot is recommended."
+                if self.pending_install_summary
+                and self.last_install_summary.reboot_recommended
+                else ""
+            )
+            self.subheadline.set_text(
+                f"Your system is up to date.{reboot_message}{suffix}"
+            )
+            self.overview_badge.set_visible(False)
             self.source_summary.set_text("No updates are waiting to be installed")
         self.announce_current_status()
         if self.pending_install_summary:
@@ -1129,7 +987,18 @@ class UpdateWindow(Adw.ApplicationWindow):
                 self.show_notice("Piper voice is disabled in the CUC configuration.")
             return
         if self.state:
-            cuc.speak_async(cuc.compose_summary_speech(self.state, self.config), self.config)
+            reboot_recommended = (
+                self.pending_install_summary
+                and self.last_install_summary.reboot_recommended
+            )
+            cuc.speak_async(
+                cuc.compose_summary_speech(
+                    self.state,
+                    self.config,
+                    reboot_recommended=reboot_recommended,
+                ),
+                self.config,
+            )
 
     def open_settings(self) -> None:
         SettingsWindow(self.config, self.apply_settings).present(self)
@@ -1137,7 +1006,7 @@ class UpdateWindow(Adw.ApplicationWindow):
     def show_about(self) -> None:
         dialog = Adw.AboutDialog(
             application_name="Cachy Update Center",
-            application_icon="software-update-available-symbolic",
+            application_icon=APP_ID,
             developer_name="Alvin and contributors",
             version=cuc.__version__,
             website="https://github.com/mezzenger/CachyOS-Updater",
@@ -1251,11 +1120,25 @@ class UpdateWindow(Adw.ApplicationWindow):
         content.append(title)
         content.append(
             Gtk.Label(
-                label="Choose the sources to install. Nothing starts until you confirm below.",
+                label=(
+                    "The complete package list is shown below. Choose the sources to install; "
+                    "nothing starts until you confirm."
+                ),
                 xalign=0,
                 wrap=True,
             )
         )
+
+        package_text = cuc.format_update_list(results)
+        copy_button = Gtk.Button(label="Copy complete list")
+        copy_button.set_halign(Gtk.Align.START)
+
+        def copy_package_list(button: Gtk.Button) -> None:
+            self.get_clipboard().set(GObject.Value(str, package_text))
+            button.set_label("Copied complete list")
+
+        copy_button.connect("clicked", copy_package_list)
+        content.append(copy_button)
 
         selections: dict[str, Gtk.CheckButton] = {}
         for result in results:
@@ -1266,24 +1149,18 @@ class UpdateWindow(Adw.ApplicationWindow):
             check.set_sensitive(result.install_allowed and not result.error)
             content.append(check)
             selections[result.source] = check
-            packages = Gtk.Label(
-                label="\n".join(f"• {item}" for item in result.items) or "• Package details unavailable",
-                xalign=0,
-                wrap=True,
-                selectable=True,
+            packages = Gtk.TextView()
+            packages.set_editable(False)
+            packages.set_cursor_visible(False)
+            packages.set_monospace(True)
+            packages.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            packages.get_buffer().set_text(
+                "\n".join(result.items) or "Package details unavailable"
             )
             packages.add_css_class("package-preview")
             packages.set_margin_start(24)
             content.append(packages)
             details = list(result.security_warnings)
-            if result.security_advisory_updated_at:
-                details.append(
-                    f"Advisory data updated: {result.security_advisory_updated_at}"
-                )
-            if result.security_advisory_url:
-                details.append(f"Advisory: {result.security_advisory_url}")
-            if result.source == "aur":
-                details.append(f"Safety metadata checked: {result.checked_at}")
             if details:
                 detail = Gtk.Label(
                     label="\n".join(f"• {line}" for line in details),
@@ -1391,7 +1268,7 @@ class UpdateWindow(Adw.ApplicationWindow):
                 source,
                 cuc.PROVIDERS[source].build_command(
                     self.config,
-                    source != "aur",
+                    True,
                 ),
             )
             for source in targets
@@ -1408,7 +1285,7 @@ class UpdateWindow(Adw.ApplicationWindow):
             self.show_notice(message)
             return
         polkit = cuc.check_polkit_readiness()
-        privileged_sources = [source for source in targets if source in ("pacman", "snap")]
+        privileged_sources = [source for source in targets if source == "pacman"]
         if privileged_sources and not polkit.ready:
             self.session.reset()
             message = (
@@ -1421,22 +1298,18 @@ class UpdateWindow(Adw.ApplicationWindow):
             return
         commands = [
             ["pkexec", str(POLKIT_HELPER), source]
-            if source in ("pacman", "snap")
+            if source == "pacman"
             else command
             for source, command in command_pairs
             if command is not None
         ]
-        if "aur" in targets and secure_terminal_command(["true"]) is None:
-            self.session.reset()
-            self.show_notice("A terminal emulator is required for secure AUR authentication and review.")
-            return
         self.session.targets = list(targets)
         self.session.commands = [list(command) for command in commands]
         self.persist_session("installation-approved")
         logging.info(
             "Update installation approved targets=%s authentication=%s",
             ",".join(targets),
-            "polkit-and-terminal" if "aur" in targets else "polkit-or-unprivileged",
+            "polkit-or-unprivileged",
         )
         self.set_update_in_progress(True)
         try:
@@ -1588,18 +1461,7 @@ class UpdateWindow(Adw.ApplicationWindow):
                 if cancel_event.is_set():
                     return cuc.ExecutionOutcome(source, "cancelled", "Cancelled before this source started.")
                 actual_command = command
-                if source == "aur":
-                    wrapped = secure_terminal_command(command)
-                    if wrapped is None:
-                        return cuc.ExecutionOutcome(source, "failed", "No secure terminal emulator was found.")
-                    actual_command = wrapped
-                    GLib.idle_add(
-                        append,
-                        "AUR review and authentication opened in a separate terminal. "
-                        "CUC never receives your password.\n",
-                    )
-                else:
-                    GLib.idle_add(append, f"$ {shlex.join(actual_command)}\n")
+                GLib.idle_add(append, f"$ {shlex.join(actual_command)}\n")
                 logging.info(
                     "Desktop update command starting source=%s command=%s",
                     source,
@@ -1654,6 +1516,8 @@ class UpdateWindow(Adw.ApplicationWindow):
                 try:
                     assert process.stdout is not None
                     for line in process.stdout:
+                        if cuc.output_recommends_reboot(line):
+                            summary.reboot_recommended = True
                         GLib.idle_add(append, line)
                     return_code = process.wait()
                 finally:

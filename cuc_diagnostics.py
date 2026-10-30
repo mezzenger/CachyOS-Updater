@@ -40,7 +40,11 @@ def _safe_config(config: Any) -> dict[str, Any]:
         else dict(config)
     )
     payload["spoken_name"] = "<redacted>"
-    for field_name in ("piper_model", "preview_dir", "log_file", "advisory_cache_file"):
+    for field_name in (
+        "piper_model",
+        "preview_dir",
+        "log_file",
+    ):
         if field_name in payload:
             payload[field_name] = sanitize_diagnostic_text(str(payload[field_name]))
     return payload
@@ -81,7 +85,7 @@ def export_diagnostics(
         "application_version": app_version,
         "commands": {
             command: shutil.which(command) is not None
-            for command in ("pacman", "checkupdates", "yay", "paru", "pikaur", "flatpak", "snap", "pkexec")
+            for command in ("pacman", "checkupdates", "flatpak", "pkexec")
         },
     }
     log_text = ""

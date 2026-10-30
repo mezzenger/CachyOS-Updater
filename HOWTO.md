@@ -1,100 +1,54 @@
-# How To Use CachyOS Update Center
+# How to Use CachyOS Update Center
 
-## Start the Desktop App
+Launch `cargo run --release --locked --bin cuc-desktop` from the checkout,
+or use the installed application launcher. The dashboard checks Pacman and Flatpak, shows each
+pending package list, and lets you install one source or all eligible sources.
 
-Run the application directly during development:
+Use Settings to enable or disable either source, configure timeouts and free
+space requirements, choose a Piper voice, and enable notifications. Pacman
+authorization uses the system Polkit agent; Flatpak runs as your desktop user.
 
-```sh
-./cuc_desktop.py
-```
+Before installation, the app verifies that results are fresh, free space is
+adequate, the Pacman database is unlocked, and no conflicting package-manager
+process is active. Retry the check after resolving any reported problem.
 
-For an installed copy, launch **Cachy Update Center** from the application
-menu or run `cuc-desktop` when installed from the Arch package.
+Keyboard shortcuts include Ctrl+R to refresh, Ctrl+U to review updates, Ctrl+D
+to export diagnostics, Ctrl+, for settings, and Ctrl+Q to quit.
 
-The app follows three steps:
+Each source card has a list icon to **Review packages** and an install icon to
+**Install this source**. The overview has corresponding actions for all eligible
+sources. Review shows the complete package lists and lets you select sources;
+**Install reviewed updates** requests installation. The install icons provide a
+short confirmation without requiring the optional package review.
+The workflow row highlights every active step in bright green. Check and Install
+pulse every 0.8 seconds while running, staying bright between pulses. After the
+commands finish, the highlight remains on through the final refresh and stays
+steady during any queued Alba announcement. Check stays green after checking,
+Review stays green once opened, and Install stays green after a successful
+installation. After the announcement finishes, all three steps and the top
+status brighten together and fade back to their normal colors over two seconds.
+A new check resets the steps. Hidden steps do not pulse, and disabled desktop
+animations use a steady highlight instead of motion.
+Repositories can change between the check and installation; Pacman runs a full
+system upgrade, and Flatpak updates installed applications and runtimes.
 
-1. Check Pacman, AUR, Flatpak, and Snap.
-2. Review package lists and any AUR safety findings.
-3. Confirm the selected sources and install.
+After confirmation, updates run in the background. The dashboard shows a short
+status and **Cancel update** control; full package-manager output is saved in the
+configured application log (default `~/.local/state/cachyos-update-center/app.log`).
+When the session finishes, the dashboard refreshes before Alba announces the
+results. On verified success, the top “Your system is up to date” status flashes
+bright green. No completion dialog covers the dashboard. Failures stay visible
+inline, and any reboot recommendation remains in the overview and announcement.
+The automatic follow-up check stays quiet.
 
-Each source card shows status, update count, and a package preview. Open the
-extended list to see every item. The review dialog lets you include or omit
-individual sources and clearly separates sources blocked by failed checks or
-AUR safety findings.
+When **Piper status announcements** is enabled, the configured voice speaks a
+summary after each completed check. The header speaker button repeats it.
+Settings includes an installed voice picker and **Play sample**. **Copy complete
+list** is in the package review. **Export diagnostics** writes a redacted ZIP
+under `$XDG_STATE_HOME/cachyos-update-center/diagnostics/` (default
+`~/.local/state/cachyos-update-center/diagnostics/`) and shows its path.
 
-## Configure the App
-
-Use the gear button to choose update sources, the preferred AUR helper,
-timeouts, minimum free space, desktop notifications, Piper voice, and signed
-AUR advisory settings. The Authentication section reports whether the Polkit
-helper required for Pacman and Snap is ready.
-
-Keyboard shortcuts are documented in `ACCESSIBILITY.md`. The most common are
-`Ctrl+R` to refresh, `Ctrl+U` to review updates, `Ctrl+,` for Settings, and
-`Ctrl+D` to export diagnostics.
-
-## Install Updates
-
-Use `Update all` to approve every eligible source with one confirmation. Use
-`Review updates` to see the full package list and choose sources first. Each
-source tile also offers its own install action.
-
-The output window streams each command and offers `Cancel update`.
-Cancellation escalates from SIGINT to SIGTERM and finally SIGKILL only when a
-process does not stop. The final summary separates succeeded, failed,
-cancelled, timed-out, and skipped sources.
-
-Pacman and Snap use the system Polkit authentication agent. AUR updates open
-in a real terminal for interactive PKGBUILD review and sudo authentication.
-This terminal is a security boundary for the desktop workflow, not a separate
-CUC console application; the desktop process never receives the password.
-
-Before installation, CUC checks result freshness, free space, Pacman locks,
-conflicting package managers, provider failures, and Snap readiness when Snap
-is selected.
-
-## Retry Failed Checks
-
-If one provider check fails, successful results remain available. Use `Retry
-failed` to check only failed providers. If installation is temporarily blocked
-by another package-manager process, finish that process and choose `Retry
-safety check` without refreshing update results.
-
-## Review AUR Safety Findings
-
-CUC blocks an AUR install when a pending package:
-
-- Appears in the bundled confirmed-incident list.
-- Is currently orphaned.
-- Is missing from the AUR metadata response.
-- Cannot be verified because the safety request failed.
-
-Do not bypass a block without manually reviewing the package repository,
-PKGBUILD history, and install-script diff.
-
-## Change the AUR Helper
-
-Open Settings and choose `auto`, `yay`, `paru`, or `pikaur`. With `auto`, CUC
-uses the first supported helper found on the system.
-
-## Export Privacy-Safe Diagnostics
-
-Select `Export diagnostics` in the desktop footer or press `Ctrl+D`. The ZIP is
-written under the configured preview directory. It contains a redacted log
-tail, configuration, source status, and platform details. Credentials, email
-addresses, the home path, spoken name, and package item lists are removed.
-
-## Configure Signed AUR Advisory Data
-
-For automatic refresh, configure `advisory_feed_url`,
-`advisory_signature_url`, and `advisory_public_key_file` under **AUR security
-advisories** in Settings. The signature file must contain the base64-encoded
-detached Ed25519 signature for the exact advisory bytes.
-
-Configure all three fields together using HTTPS URLs and an absolute path to a
-trusted public-key file. Leave all three blank if you do not operate or trust a
-signed advisory service; CUC will use still-valid cached or bundled data.
-
-CUC refreshes no more often than `advisory_refresh_hours`, rejects expired or
-rolled-back advisories, and retains valid fallback data when a network refresh
-fails.
+**Cancel update** requests interruption and waits for the process to exit.
+Cancellation or timeout skips the remaining sources. A failed source does not
+prevent an independent source from running. Interrupted package transactions
+can require manual recovery; inspect the application log before trying again.

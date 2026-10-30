@@ -17,28 +17,18 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-
-from cuc_advisory import (
-    AdvisoryUpdateError,
-    advisory_is_expired,
-    install_signed_advisory,
-    load_authenticated_cache,
-    validate_advisory,
-)
 from cuc_controller import ExecutionOutcome, UpdateController, UpdateExecutor
 from cuc_diagnostics import export_diagnostics as export_diagnostics
 from cuc_providers import ProviderRegistry, UpdateProvider
 
 APP_NAME = "cachyos-update-center"
 __version__ = "0.6.0"
+ALL_CURRENT_STATUS = "Annoyingly current"
 DEFAULT_PIPER_MODEL = "/usr/share/piper-voices/en/en_GB/alba/medium/en_GB-alba-medium.onnx"
 DEFAULT_PREVIEW_DIR = Path.home() / ".cache" / "update-check-preview"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / APP_NAME / "config.json"
@@ -46,25 +36,14 @@ DEFAULT_LOG_PATH = Path.home() / ".local" / "state" / APP_NAME / "app.log"
 DEFAULT_WINDOW_STATE_PATH = Path(
     os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
 ) / APP_NAME / "window-state.json"
-DEFAULT_ADVISORY_CACHE = Path.home() / ".cache" / APP_NAME / "aur-security-advisories.json"
 DEFAULT_TIMEOUT = 120
 VOICE_TIMEOUT = 45
 PLAYER_TIMEOUT = 60
-UPDATE_SOURCES = ("pacman", "aur", "flatpak", "snap")
+UPDATE_SOURCES = ("pacman", "flatpak")
+LEGACY_UPDATE_SOURCES = {"aur", "snap"}
 SOURCE_DISPLAY_NAMES = {
     "pacman": "Pacman",
-    "aur": "AUR",
     "flatpak": "Flatpak",
-    "snap": "Snap",
-}
-SUPPORTED_AUR_HELPERS = ("yay", "paru", "pikaur")
-AUR_ADVISORY_PATH = Path(__file__).with_name("data") / "aur-security-advisories.json"
-AUR_RPC_URL = "https://aur.archlinux.org/rpc/v5/info"
-AUR_RPC_BATCH_SIZE = 50
-AUR_NONINTERACTIVE_OPTIONS = {
-    "yay": ["--noconfirm", "--sudoloop", "--sudoflags", "-n"],
-    "paru": ["--noconfirm", "--sudoloop", "--sudoflags", "-n"],
-    "pikaur": ["--noconfirm"],
 }
 
 voice_thread_lock = threading.Lock()
@@ -122,29 +101,6 @@ def save_window_state(
     temporary.replace(path)
 
 
-def validate_signed_advisory_settings(
-    feed_url: str,
-    signature_url: str,
-    public_key_file: str,
-) -> tuple[str, str, str]:
-    """Validate and normalize the optional signed-advisory configuration."""
-    values = tuple(value.strip() for value in (feed_url, signature_url, public_key_file))
-    if not any(values):
-        return values
-    if not all(values):
-        raise ConfigError(
-            "Signed advisory updates require the feed URL, signature URL, and public key file together."
-        )
-    for label, url in (("feed", values[0]), ("signature", values[1])):
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ConfigError(f"The signed advisory {label} URL must be a valid HTTPS URL.")
-    key_path = Path(values[2]).expanduser()
-    if not key_path.is_absolute():
-        raise ConfigError("The signed advisory public key file must use an absolute path.")
-    return values[0], values[1], str(key_path)
-
-
 @dataclass(slots=True)
 class Config:
     voice_enabled: bool = True
@@ -156,13 +112,7 @@ class Config:
     max_result_age_minutes: int = 15
     minimum_free_space_mb: int = 1024
     spoken_name: str = "Cozmik"
-    aur_helper: str = "auto"
     notifications_enabled: bool = True
-    advisory_cache_file: str = str(DEFAULT_ADVISORY_CACHE)
-    advisory_feed_url: str = ""
-    advisory_signature_url: str = ""
-    advisory_public_key_file: str = ""
-    advisory_refresh_hours: int = 24
     enabled_sources: dict[str, bool] = field(
         default_factory=lambda: {source: True for source in UPDATE_SOURCES}
     )
@@ -183,12 +133,6 @@ class Config:
             if not isinstance(value, str) or not value.strip():
                 raise ConfigError(f"Configuration field '{name}' must be a non-empty string.")
             return value
-
-        def optional_string(name: str, default: str = "") -> str:
-            value = data.get(name, default)
-            if not isinstance(value, str):
-                raise ConfigError(f"Configuration field '{name}' must be a string.")
-            return value.strip()
 
         voice_enabled = data.get("voice_enabled", True)
         if not isinstance(voice_enabled, bool):
@@ -211,7 +155,7 @@ class Config:
         )
         if not isinstance(enabled_sources, dict):
             raise ConfigError("Configuration field 'enabled_sources' must be an object.")
-        unknown_sources = set(enabled_sources) - set(UPDATE_SOURCES)
+        unknown_sources = set(enabled_sources) - set(UPDATE_SOURCES) - LEGACY_UPDATE_SOURCES
         if unknown_sources:
             raise ConfigError(
                 "Configuration field 'enabled_sources' contains unknown source(s): "
@@ -223,17 +167,6 @@ class Config:
         if any(not isinstance(value, bool) for value in normalized_sources.values()):
             raise ConfigError("Every 'enabled_sources' value must be true or false.")
 
-        aur_helper = string("aur_helper", "auto").lower()
-        if aur_helper not in ("auto", *SUPPORTED_AUR_HELPERS):
-            choices = ", ".join(("auto", *SUPPORTED_AUR_HELPERS))
-            raise ConfigError(f"Configuration field 'aur_helper' must be one of: {choices}.")
-
-        advisory_settings = validate_signed_advisory_settings(
-            optional_string("advisory_feed_url"),
-            optional_string("advisory_signature_url"),
-            optional_string("advisory_public_key_file"),
-        )
-
         return cls(
             voice_enabled=voice_enabled,
             piper_model=string("piper_model", DEFAULT_PIPER_MODEL),
@@ -244,16 +177,7 @@ class Config:
             max_result_age_minutes=positive_integer("max_result_age_minutes", 15),
             minimum_free_space_mb=positive_integer("minimum_free_space_mb", 1024),
             spoken_name=string("spoken_name", "Cozmik"),
-            aur_helper=aur_helper,
             notifications_enabled=boolean("notifications_enabled", True),
-            advisory_cache_file=string(
-                "advisory_cache_file",
-                str(DEFAULT_ADVISORY_CACHE),
-            ),
-            advisory_feed_url=advisory_settings[0],
-            advisory_signature_url=advisory_settings[1],
-            advisory_public_key_file=advisory_settings[2],
-            advisory_refresh_hours=positive_integer("advisory_refresh_hours", 24),
             enabled_sources=normalized_sources,
         )
 
@@ -262,15 +186,6 @@ class Config:
         # This leaves the original file available for manual recovery.
         if path.exists():
             type(self).load(path)
-        (
-            self.advisory_feed_url,
-            self.advisory_signature_url,
-            self.advisory_public_key_file,
-        ) = validate_signed_advisory_settings(
-            self.advisory_feed_url,
-            self.advisory_signature_url,
-            self.advisory_public_key_file,
-        )
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
@@ -297,6 +212,16 @@ class UpdateResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def format_update_list(results: Iterable[UpdateResult]) -> str:
+    """Format every pending item for display or clipboard export without truncation."""
+    sections: list[str] = []
+    for result in results:
+        noun = "update" if result.count == 1 else "updates"
+        items = "\n".join(result.items) or "Package details unavailable"
+        sections.append(f"{result.display_name} — {result.count} {noun}\n{items}")
+    return "\n\n".join(sections)
 
 
 @dataclass(slots=True)
@@ -354,51 +279,6 @@ class AppState:
             if (current_time - checked_at).total_seconds() > max_age_minutes * 60:
                 stale.append(source)
         return stale
-
-
-@dataclass(slots=True)
-class AurSecurityReport:
-    package_names: list[str]
-    compromised: list[str] = field(default_factory=list)
-    orphaned: list[str] = field(default_factory=list)
-    missing: list[str] = field(default_factory=list)
-    incident_active: bool = False
-    advisory_url: str = ""
-    advisory_updated_at: str = ""
-    error: str | None = None
-
-    def install_allowed(self) -> bool:
-        return not (self.compromised or self.orphaned or self.missing or self.error)
-
-    def status(self) -> str:
-        if not self.install_allowed():
-            return "blocked"
-        if self.incident_active:
-            return "review-required"
-        return "clear"
-
-    def warnings(self) -> list[str]:
-        warnings: list[str] = []
-        if self.compromised:
-            warnings.append(
-                "Known affected AUR package(s): " + ", ".join(self.compromised) + "."
-            )
-        if self.orphaned:
-            warnings.append(
-                "Currently orphaned AUR package(s): " + ", ".join(self.orphaned) + "."
-            )
-        if self.missing:
-            warnings.append(
-                "Package metadata was not returned by the AUR: " + ", ".join(self.missing) + "."
-            )
-        if self.error:
-            warnings.append(f"AUR safety metadata could not be verified: {self.error}")
-        if self.incident_active:
-            warnings.append(
-                "Arch Linux reports an active AUR malicious-package incident; review PKGBUILD "
-                "and install-script changes before continuing."
-            )
-        return warnings
 
 
 class SessionPhase(str, Enum):
@@ -491,6 +371,7 @@ class InstallOutcome:
 @dataclass(slots=True)
 class InstallSummary:
     outcomes: list[InstallOutcome] = field(default_factory=list)
+    reboot_recommended: bool = False
 
     def add(
         self,
@@ -525,6 +406,14 @@ class InstallSummary:
             if sources:
                 groups.append(f"{status.capitalize()}: {', '.join(sources)}")
         return " · ".join(groups)
+
+
+def output_recommends_reboot(text: str) -> bool:
+    """Return whether update output contains an affirmative reboot recommendation."""
+    normalized = " ".join(text.casefold().split())
+    if "no reboot recommended" in normalized or "reboot is not recommended" in normalized:
+        return False
+    return "reboot recommended" in normalized or "reboot is recommended" in normalized
 
 
 def configure_logging(log_path: Path) -> None:
@@ -595,11 +484,11 @@ def check_polkit_readiness(
         return PolkitReadiness(False, "The CUC Polkit files are writable by non-root users.")
     if not os.access(helper_path, os.X_OK):
         return PolkitReadiness(False, "The CUC privileged helper is not executable.")
-    return PolkitReadiness(True, "Native Polkit authentication is ready for Pacman and Snap.")
+    return PolkitReadiness(True, "Native Polkit authentication is ready for Pacman.")
 
 
 def _running_package_managers(proc_root: Path = Path("/proc")) -> list[RunningPackageManager]:
-    manager_names = {"pacman", "yay", "paru", "pikaur", "flatpak", "snap"}
+    manager_names = {"pacman", "flatpak"}
     running: list[RunningPackageManager] = []
     try:
         process_directories = list(proc_root.iterdir())
@@ -675,7 +564,7 @@ def check_update_preflight(
                 + ".",
             )
         )
-    if "pacman" in selected or "aur" in selected:
+    if "pacman" in selected:
         if pacman_lock.exists():
             issues.append(
                 PreflightIssue(
@@ -685,12 +574,10 @@ def check_update_preflight(
                 )
             )
     conflicting_names: set[str] = set()
-    if {"pacman", "aur"} & set(selected):
-        conflicting_names.update(("pacman", "yay", "paru", "pikaur"))
+    if "pacman" in selected:
+        conflicting_names.add("pacman")
     if "flatpak" in selected:
         conflicting_names.add("flatpak")
-    if "snap" in selected:
-        conflicting_names.add("snap")
     running = [
         process
         for process in _running_package_managers(proc_root)
@@ -724,32 +611,6 @@ def check_update_preflight(
                 blocking=False,
             )
         )
-    if "snap" in selected and command_exists("systemctl"):
-        try:
-            snap_status = subprocess.run(
-                ["systemctl", "is-active", "--quiet", "snapd.socket"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=min(config.command_timeout, 10),
-            )
-            if snap_status.returncode:
-                issues.append(
-                    PreflightIssue(
-                        "snap-service",
-                        "Snap is selected but snapd.socket is not active.",
-                        source="snap",
-                    )
-                )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            issues.append(
-                PreflightIssue(
-                    "snap-service-check",
-                    f"Snap service readiness could not be checked: {exc}",
-                    blocking=False,
-                    source="snap",
-                )
-            )
     return issues
 
 
@@ -960,52 +821,6 @@ def check_flatpak_updates(config: Config) -> UpdateResult:
     return result
 
 
-def parse_snap_updates(output: str) -> list[str]:
-    """Return data rows from ``snap refresh --list`` output."""
-    items: list[str] = []
-    for raw in output.splitlines():
-        line = raw.strip()
-        if not line or line == "All snaps up to date.":
-            continue
-        # The table header starts with the exact column name "Name". Package
-        # names such as snap-store and snapcraft are legitimate data rows.
-        if line.split(maxsplit=1)[0].lower() == "name":
-            continue
-        items.append(raw.rstrip())
-    return items
-
-
-def check_snap_updates(config: Config) -> UpdateResult:
-    result = UpdateResult(
-        source="snap",
-        display_name="Snap",
-        command_hint="sudo pacman -S snapd",
-    )
-    if not command_exists("snap"):
-        result.available_on_system = False
-        result.error = "Snap is not installed."
-        return result
-
-    try:
-        proc = run_capture(["snap", "refresh", "--list"], timeout=config.command_timeout, ok_returncodes=(0,))
-        items = parse_snap_updates(proc.stdout)
-        result.items = items
-        result.count = len(items)
-        result.available = result.count > 0
-    except Exception as exc:
-        result.error = str(exc)
-    return result
-
-
-def find_aur_helper(config: Config) -> str | None:
-    if config.aur_helper != "auto":
-        return config.aur_helper if command_exists(config.aur_helper) else None
-    for helper in SUPPORTED_AUR_HELPERS:
-        if command_exists(helper):
-            return helper
-    return None
-
-
 def parse_update_lines(output: str, *, preserve_spacing: bool = False) -> list[str]:
     return [
         line.rstrip() if preserve_spacing else line.strip()
@@ -1014,172 +829,12 @@ def parse_update_lines(output: str, *, preserve_spacing: bool = False) -> list[s
     ]
 
 
-def aur_package_name(update_line: str) -> str:
-    """Extract the package name from common AUR-helper ``-Qua`` output."""
-    return update_line.strip().split(maxsplit=1)[0] if update_line.strip() else ""
-
-
-def load_aur_advisory(path: Path = AUR_ADVISORY_PATH) -> dict[str, Any]:
-    try:
-        advisory = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot read bundled advisory data: {exc}") from exc
-    try:
-        return validate_advisory(advisory)
-    except AdvisoryUpdateError as exc:
-        raise RuntimeError(f"bundled AUR advisory data has an invalid format: {exc}") from exc
-
-
-def load_effective_aur_advisory(config: Config) -> dict[str, Any]:
-    cache_path = Path(config.advisory_cache_file)
-    cached = load_authenticated_cache(cache_path)
-    bundled = load_aur_advisory()
-    current = cached or bundled
-    signed_feed = (
-        config.advisory_feed_url,
-        config.advisory_signature_url,
-        config.advisory_public_key_file,
-    )
-    refresh_due = True
-    try:
-        refresh_due = (
-            time.time() - cache_path.stat().st_mtime
-            > config.advisory_refresh_hours * 3600
-        )
-    except OSError:
-        pass
-    if all(signed_feed) and refresh_due:
-        try:
-            current = install_signed_advisory(
-                config.advisory_feed_url,
-                config.advisory_signature_url,
-                Path(config.advisory_public_key_file),
-                cache_path,
-                timeout=min(config.command_timeout, 30),
-                current_advisory=current,
-            )
-            logging.info("Installed refreshed signed AUR advisory dated %s", current["updated_at"])
-        except AdvisoryUpdateError as exc:
-            logging.warning("Signed AUR advisory refresh failed: %s", exc)
-    if advisory_is_expired(current):
-        raise RuntimeError(
-            "AUR advisory data has expired; install a current signed advisory before updating AUR packages."
-        )
-    return current
-
-
-def fetch_aur_metadata(package_names: list[str], *, timeout: int) -> dict[str, dict[str, Any]]:
-    metadata: dict[str, dict[str, Any]] = {}
-    for start in range(0, len(package_names), AUR_RPC_BATCH_SIZE):
-        batch = package_names[start : start + AUR_RPC_BATCH_SIZE]
-        query = urllib.parse.urlencode([("arg[]", name) for name in batch])
-        request = urllib.request.Request(
-            f"{AUR_RPC_URL}?{query}",
-            headers={"User-Agent": f"{APP_NAME}/{__version__}"},
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.load(response)
-        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-            raise RuntimeError("AUR returned an invalid metadata response")
-        for item in payload["results"]:
-            if isinstance(item, dict) and isinstance(item.get("Name"), str):
-                metadata[item["Name"]] = item
-    return metadata
-
-
-def evaluate_aur_security(
-    package_names: list[str],
-    metadata: Mapping[str, Mapping[str, Any]],
-    advisory: Mapping[str, Any],
-    *,
-    error: str | None = None,
-) -> AurSecurityReport:
-    affected = {
-        str(item.get("name"))
-        for item in advisory.get("affected_packages", [])
-        if isinstance(item, dict) and item.get("name")
-    }
-    return AurSecurityReport(
-        package_names=package_names,
-        compromised=sorted(name for name in package_names if name in affected),
-        orphaned=sorted(
-            name for name in package_names
-            if name in metadata and metadata[name].get("Maintainer") is None
-        ),
-        missing=sorted(name for name in package_names if name not in metadata) if not error else [],
-        incident_active=bool(advisory.get("incident_active", False)),
-        advisory_url=str(advisory.get("advisory_url", "")),
-        advisory_updated_at=str(advisory.get("updated_at", "")),
-        error=error,
-    )
-
-
-def audit_aur_updates(items: list[str], config: Config) -> AurSecurityReport:
-    package_names = list(dict.fromkeys(filter(None, (aur_package_name(item) for item in items))))
-    try:
-        advisory = load_effective_aur_advisory(config)
-    except RuntimeError as exc:
-        return AurSecurityReport(package_names=package_names, error=str(exc))
-    if not package_names:
-        return evaluate_aur_security([], {}, advisory)
-    try:
-        metadata = fetch_aur_metadata(package_names, timeout=min(config.command_timeout, 20))
-    except (OSError, ValueError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        return evaluate_aur_security(package_names, {}, advisory, error=str(exc))
-    return evaluate_aur_security(package_names, metadata, advisory)
-
-
-def check_aur_updates(config: Config) -> UpdateResult:
-    result = UpdateResult(
-        source="aur",
-        display_name="AUR",
-        command_hint="Install an AUR helper such as yay, paru, or pikaur.",
-    )
-    helper = find_aur_helper(config)
-    if helper is None:
-        result.available_on_system = False
-        if config.aur_helper == "auto":
-            result.error = "No supported AUR helper found. Install yay, paru, or pikaur."
-        else:
-            result.error = f"Configured AUR helper '{config.aur_helper}' was not found."
-        return result
-
-    try:
-        proc = run_capture([helper, "-Qua"], timeout=config.command_timeout, ok_returncodes=(0, 1))
-        if proc.returncode != 0 and (proc.stderr or "").strip():
-            raise RuntimeError(proc.stderr.strip())
-        items = parse_update_lines(proc.stdout)
-        result.items = items
-        result.count = len(items)
-        result.available = result.count > 0
-        result.command_hint = f"{helper} -Sua"
-        report = audit_aur_updates(items, config)
-        result.install_allowed = report.install_allowed()
-        result.security_status = report.status()
-        result.security_warnings = report.warnings()
-        result.security_advisory_url = report.advisory_url
-        result.security_advisory_updated_at = report.advisory_updated_at
-    except Exception as exc:
-        result.error = str(exc)
-    return result
-
-
 def build_update_command(source: str, config: Config, *, noninteractive: bool = False) -> list[str] | None:
     if source == "pacman":
         command = ["sudo", "-n", "pacman", "-Syu"] if noninteractive else ["sudo", "pacman", "-Syu"]
         return [*command, "--noconfirm"] if noninteractive else command
-    if source == "aur":
-        helper = find_aur_helper(config)
-        if not helper:
-            return None
-        command = [helper, "-Sua"]
-        if noninteractive:
-            command.extend(AUR_NONINTERACTIVE_OPTIONS.get(helper, ["--noconfirm"]))
-        return command
     if source == "flatpak":
         return ["flatpak", "update", "-y"] if noninteractive else ["flatpak", "update"]
-    if source == "snap":
-        return ["sudo", "-n", "snap", "refresh"] if noninteractive else ["sudo", "snap", "refresh"]
     return None
 
 
@@ -1202,9 +857,7 @@ def build_update_commands(
 
 CHECKERS = {
     "pacman": check_pacman_updates,
-    "aur": check_aur_updates,
     "flatpak": check_flatpak_updates,
-    "snap": check_snap_updates,
 }
 
 
@@ -1263,12 +916,26 @@ def check_all_parallel(
     return AppState(results)
 
 
-def compose_summary_speech(state: AppState, config: Config) -> str:
+def compose_summary_speech(
+    state: AppState,
+    config: Config,
+    *,
+    reboot_recommended: bool = False,
+) -> str:
     failed = state.failed_results()
     if failed:
         return f"Update check incomplete. Could not check {', '.join(result.display_name for result in failed)}."
     if not state.any_updates():
-        return f"{config.spoken_name}.. Your system is currently up to date and is operating nominally!"
+        if reboot_recommended:
+            return (
+                f"{config.spoken_name}.. Your system is up to date. "
+                "A reboot is recommended."
+            )
+        message = (
+            f"{config.spoken_name}.. Your system is currently up to date "
+            "and is operating nominally!"
+        )
+        return message
 
     parts = []
     for result in state.results.values():

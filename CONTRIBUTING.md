@@ -1,68 +1,32 @@
 # Contributing
 
-This is a small Python project with no build system. Keep changes focused and
-match the existing style.
+The active implementation lives in `rust/`, with explicit binary paths in
+`Cargo.toml` because the legacy Arch packaging ignores a root `src/` directory.
+Keep Pacman and Flatpak behavior isolated behind the provider functions. Prefer
+the standard library and preserve defensive config handling: invalid files must
+be reported, not overwritten. Mock subprocesses and optional system tools in
+tests.
 
-## Project Files
-
-- `cuc_backend.py`: shared models, configuration, provider implementations,
-  security checks, logging, and voice support.
-- `cuc_controller.py`: frontend-independent orchestration and command planning.
-- `cuc_providers.py`: common provider contract and ordered registry.
-- `cuc_advisory.py`: authenticated advisory download and cache validation.
-- `cuc_diagnostics.py`: privacy-safe diagnostic bundle export.
-- `cuc_desktop.py`: GTK/libadwaita desktop app.
-- `cuc_privileged.py`: fixed-command Polkit helper for system-managed sources.
-- `test_cuc.py`: unit tests for config and core update behavior.
-- `io.github.alvin.Cuc.desktop`: desktop launcher.
-- `data/aur-security-advisories.json`: source-attributed AUR incident data.
-- `tests/fixtures/`: representative provider output.
-
-## Local Checks
-
-Run these before handing off changes:
+Run before handoff:
 
 ```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
 python3 -m unittest -v test_cuc.py
-python3 -m py_compile cuc_backend.py cuc_advisory.py cuc_controller.py cuc_desktop.py
+python3 -m py_compile cuc_backend.py cuc_controller.py cuc_desktop.py
 python3 -m py_compile cuc_diagnostics.py cuc_providers.py cuc_privileged.py
-xmllint --noout packaging/io.github.alvin.Cuc.policy
-bash -n PKGBUILD scripts/*.sh
 ```
 
-CI also runs Ruff, MyPy on the GTK-independent modules, coverage reporting,
-ShellCheck, XML validation, and PKGBUILD syntax validation.
+Pacman desktop updates must continue through the fixed-command Polkit helper.
+Do not add password collection to the desktop process. Keep logs and previews
+in their documented XDG locations.
 
-## Style Notes
-
-- Prefer standard-library code unless a dependency is already used.
-- Keep update-source behavior behind the provider contract and registry.
-- Treat Pacman, AUR, Flatpak, and Snap as independent optional sources.
-- Do not overwrite invalid config files.
-- Never collect administrator passwords in the desktop process or pass
-  credential-bearing file descriptors to update helpers.
-- Keep Pacman and Snap behind the fixed-command Polkit helper. Run AUR helpers
-  as the desktop user in a real terminal so package review remains interactive.
-- Treat the AUR advisory list as a backstop, never as proof that another
-  package is safe.
-- Add an authoritative source URL for each advisory entry.
-- Keep the Ed25519 advisory private key offline and outside the repository. Use
-  `scripts/sign-advisory.py` to produce the detached base64 signature; publish
-  only the public key, advisory JSON, and `.sig` file.
-
-## Manual Test Checklist
-
-Run the desktop app:
-
-```sh
-./cuc_desktop.py
-```
-
-In the desktop app, check:
-
-- Refresh button starts a new check.
-- Extended package list opens and closes with Enter.
-- Settings save and reload correctly.
-- AUR installs do not open a separate authentication prompt.
-- AUR safety blocks cannot proceed through the review dialog.
-- Cancelling an update stops the active process and refreshes status.
+`rust/gtk.rs` contains the small system GTK4/libadwaita FFI surface. Keep
+callbacks on the GTK main thread and match each C signal signature exactly.
+Workers send plain data through a channel; they never access GTK pointers.
+Run `./target/release/cuc-desktop --smoke-test` on a graphical session to
+construct the dashboard, settings and review windows using fixture data,
+then exit automatically. It does not access update sources, install packages,
+write settings or play audio.
